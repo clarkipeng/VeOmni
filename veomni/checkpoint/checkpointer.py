@@ -304,6 +304,7 @@ class DistributedCheckpointer(CheckpointerBase):
         state: Dict[str, Any],
         save_async: bool = False,
         global_steps: int = None,
+        storage_writer: Optional[FileSystemWriter] = None,
     ) -> None:
         """
         save training state to distributed checkpoint
@@ -348,25 +349,31 @@ class DistributedCheckpointer(CheckpointerBase):
                 # block until all the ranks resolve their previous dcp async saving
                 dist.barrier()
 
-            cls.dcp_save_future = dcp.async_save(
-                state_dict=save_state,
-                storage_writer=FileSystemWriter(
+            if storage_writer is None:
+                storage_writer = FileSystemWriter(
                     checkpoint_dir,
                     thread_count=16,
                     single_file_per_rank=True,
                     sync_files=False,
-                ),
+                )
+
+            cls.dcp_save_future = dcp.async_save(
+                state_dict=save_state,
+                storage_writer=storage_writer,
                 process_group=cls._async_process_group,
             )
         else:
-            dcp.save(
-                state_dict=save_state,
-                storage_writer=FileSystemWriter(
+            if storage_writer is None:
+                storage_writer = FileSystemWriter(
                     checkpoint_dir,
                     thread_count=16,
                     single_file_per_rank=True,
                     sync_files=False,
-                ),
+                )
+
+            dcp.save(
+                state_dict=save_state,
+                storage_writer=storage_writer,
             )
 
         logger.info_rank0(f"Saved checkpoint to {checkpoint_dir}")
@@ -377,6 +384,7 @@ class DistributedCheckpointer(CheckpointerBase):
         path: str,
         state: Dict[str, Any],
         process_group=None,
+        storage_reader: Optional[FileSystemReader] = None,
     ) -> Dict[str, Any]:
         """
         load training state from distributed checkpoint
@@ -399,9 +407,12 @@ class DistributedCheckpointer(CheckpointerBase):
         if "optimizer" in state:
             load_state["optimizer"] = OptimizerState(model=state["model"], optimizer=state["optimizer"])  # type: ignore[index]
 
+        if storage_reader is None:
+            storage_reader = FileSystemReader(checkpoint_dir)
+
         dcp.load(
             state_dict=load_state,
-            storage_reader=FileSystemReader(checkpoint_dir),
+            storage_reader=storage_reader,
             process_group=process_group,
         )
         # Note: further per-param DTensor alignment and device fixes happen inside OptimizerState.load_state_dict
