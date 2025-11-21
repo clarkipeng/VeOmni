@@ -1,9 +1,11 @@
 import json
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List
 
 import torch
@@ -21,7 +23,7 @@ from veomni.data import (
     build_dataset,
     build_multimodal_chat_template,
 )
-from veomni.data.constants import IMAGE_INPUT_INDEX
+from veomni.data.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
 from veomni.data.multimodal import conv_preprocess
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
@@ -48,7 +50,56 @@ if TYPE_CHECKING:
 logger = helper.create_logger(__name__)
 
 
-MAX_PIXELS = 768 * 28 * 28
+def upload_checkpoint_to_s3(local_path: str, s3_path: str) -> None:
+    """
+    Upload a checkpoint directory to S3.
+    
+    Args:
+        local_path: Local path to the checkpoint directory
+        s3_path: S3 path in format s3://bucket/key
+    """
+    if not s3_path.startswith("s3://"):
+        logger.warning(f"S3 path must start with 's3://', got {s3_path}. Skipping upload.")
+        return
+    
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError:
+        logger.warning("boto3 is not installed. Skipping S3 upload. Install with: pip install boto3")
+        return
+    
+    try:
+        # Parse s3://bucket/key
+        parts = s3_path[5:].split("/", 1)
+        bucket = parts[0]
+        base_key = parts[1] if len(parts) > 1 else ""
+        
+        s3_client = boto3.client("s3")
+        local_path_obj = Path(local_path)
+        
+        if not local_path_obj.exists():
+            logger.warning(f"Local checkpoint path does not exist: {local_path}. Skipping upload.")
+            return
+        
+        # Upload all files in the checkpoint directory
+        uploaded_count = 0
+        for file_path in local_path_obj.rglob("*"):
+            if file_path.is_file():
+                relative_path = file_path.relative_to(local_path_obj)
+                s3_key = f"{base_key}/{relative_path}".replace("\\", "/") if base_key else str(relative_path).replace("\\", "/")
+                
+                s3_client.upload_file(str(file_path), bucket, s3_key)
+                uploaded_count += 1
+        
+        logger.info_rank0(f"Uploaded {uploaded_count} files from {local_path} to {s3_path}")
+    except ClientError as e:
+        logger.error(f"Failed to upload checkpoint to S3: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error during S3 upload: {e}")
+
+
+MAX_PIXELS = 256 * 28 * 28
 ROLE_MAPPING = {
     "human": "user",
     "gpt": "assistant",
@@ -65,9 +116,28 @@ def process_sample(
     """
     Processes multimodal example with qwen2vl's pre-processor.
     """
-    source_name = sample["source_name"] if "source_name" in sample else kwargs["source_name"]
-    conversations = sample["text"] if source_name == "fineweb_100BT" else sample["conversations"]  # text-only data
-    conversations = conv_preprocess(source_name, conversations, **kwargs)
+    source_name = sample.get("source_name") or kwargs.get("source_name")
+    # Handle different data formats: "text" for fineweb, "conversations" or "messages" for conversation data
+    if source_name == "fineweb_100BT":
+        conversations = sample["text"]
+    elif "conversations" in sample:
+        conversations = sample["conversations"]
+    elif "messages" in sample:
+        conversations = sample["messages"]
+    else:
+        raise KeyError(f"Sample must have one of 'text', 'conversations', or 'messages' keys. Found keys: {list(sample.keys())}")
+    
+    # Skip preprocessing if source_name is None or empty (data is already in correct format)
+    if source_name:
+        conversations = conv_preprocess(source_name, conversations, **kwargs)
+    elif conversations:
+        converted_conversations = []
+        for msg in conversations:
+            role = msg.get("role", "").lower()
+            content = msg.get("content", "")
+            if role in ["user", "assistant"]:
+                converted_conversations.append([role, ("text", content)])
+        conversations = converted_conversations
 
     token_num_inputs, image_inputs = {}, {}
     image_grid_thw = None
@@ -96,7 +166,9 @@ def process_sample(
     # clone here as text_only data is (1, l).expand(dim, -1),
 
     tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
+    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
     tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
+    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
     tokenized_example.update(image_inputs)
     return [tokenized_example]
 
@@ -164,6 +236,7 @@ def main():
         config_path=args.model.config_path,
         weights_path=args.model.model_path,
         torch_dtype="float32" if args.train.enable_mixed_precision else "bfloat16",
+        config_kwargs = {"attn_implementation":args.model.attn_implementation},
         init_device=args.train.init_device,
         force_use_huggingface=args.model.force_use_huggingface,
     )
@@ -350,13 +423,115 @@ def main():
                 logger.info(f"epoch:{epoch} Dataloader finished with drop_last {args.data.drop_last}")
                 break
 
-            if global_step == 1:
+            if global_step == 1 and args.train.local_rank == 0:
                 helper.print_example(example=micro_batches[0], rank=args.train.local_rank)
+                
+                # Dump first batch sequence to file for debugging
+                dump_file = Path(args.train.output_dir) / "veomni_first_batch_dump.txt"
+                dump_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(dump_file, "w", encoding="utf-8") as f:
+                    f.write("=" * 80 + "\n")
+                    f.write("VeOmni First Batch Sequence Dump\n")
+                    f.write("=" * 80 + "\n\n")
+                    for mb_idx, micro_batch in enumerate(micro_batches):
+                        f.write(f"\n--- Micro Batch {mb_idx} ---\n\n")
+                        input_ids = micro_batch.get("input_ids")
+                        labels = micro_batch.get("labels")
+                        attention_mask = micro_batch.get("attention_mask")
+                        
+                        if input_ids is not None:
+                            f.write(f"input_ids shape: {input_ids.shape}\n")
+                            f.write(f"input_ids (first 200 tokens): {input_ids[0, :200].tolist()}\n")
+                            # Decode tokens
+                            try:
+                                # Use the processor that was already built earlier
+                                tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+                                decoded = tokenizer.decode(input_ids[0], skip_special_tokens=False)
+                                f.write(f"\nDecoded input_ids:\n{decoded}\n")
+                            except Exception as e:
+                                f.write(f"\nCould not decode tokens: {e}\n")
+                        
+                        if labels is not None:
+                            f.write(f"\nlabels shape: {labels.shape}\n")
+                            num_valid = (labels != -100).sum().item()
+                            num_total = labels.numel()
+                            f.write(f"valid labels: {num_valid}/{num_total} ({100*num_valid/num_total:.2f}%)\n")
+                            f.write(f"labels (first 200 tokens): {labels[0, :200].tolist()}\n")
+                            # Show which positions are valid
+                            valid_positions = (labels[0] != -100).nonzero(as_tuple=True)[0].tolist()
+                            f.write(f"valid label positions (first 100): {valid_positions[:100]}\n")
+                            
+                            # Show tokens INCLUDED in loss, in segments
+                            if input_ids is not None:
+                                f.write(f"\n--- Tokens INCLUDED in Loss (shown in segments) ---\n")
+                                f.write(f"Total valid positions: {len(valid_positions)}\n\n")
+                                
+                                if len(valid_positions) > 0:
+                                    try:
+                                        tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+                                        
+                                        # Group consecutive positions into segments
+                                        segments = []
+                                        current_segment = [valid_positions[0]]
+                                        for i in range(1, len(valid_positions)):
+                                            if valid_positions[i] == valid_positions[i-1] + 1:
+                                                current_segment.append(valid_positions[i])
+                                            else:
+                                                segments.append(current_segment)
+                                                current_segment = [valid_positions[i]]
+                                        segments.append(current_segment)
+                                        
+                                        f.write(f"Found {len(segments)} continuous segments of valid tokens\n\n")
+                                        
+                                        # Show each segment
+                                        for seg_idx, segment in enumerate(segments):
+                                            start_pos = segment[0]
+                                            end_pos = segment[-1]
+                                            segment_token_ids = input_ids[0, start_pos:end_pos+1].tolist()
+                                            segment_labels = labels[0, start_pos:end_pos+1].tolist()
+                                            
+                                            f.write(f"--- Segment {seg_idx + 1}/{len(segments)}: positions {start_pos}-{end_pos} ({len(segment)} tokens) ---\n")
+                                            f.write(f"Token IDs: {segment_token_ids[:50]}{'...' if len(segment_token_ids) > 50 else ''}\n")
+                                            f.write(f"Labels: {segment_labels[:50]}{'...' if len(segment_labels) > 50 else ''}\n")
+                                            
+                                            # Decode the segment
+                                            try:
+                                                decoded_segment = tokenizer.decode(segment_token_ids, skip_special_tokens=False)
+                                                f.write(f"Decoded text:\n{decoded_segment}\n")
+                                            except Exception as e:
+                                                f.write(f"Could not decode segment: {e}\n")
+                                            f.write("\n")
+                                            
+                                            # Limit to first 20 segments to avoid huge files
+                                            if seg_idx >= 19:
+                                                remaining = len(segments) - 20
+                                                if remaining > 0:
+                                                    f.write(f"... ({remaining} more segments omitted)\n")
+                                                break
+                                    except Exception as e:
+                                        f.write(f"\nCould not process valid tokens: {e}\n")
+                        
+                        if attention_mask is not None:
+                            f.write(f"\nattention_mask shape: {attention_mask.shape}\n")
+                            num_attn = attention_mask.sum().item()
+                            f.write(f"attention_mask sum: {num_attn}/{attention_mask.numel()}\n")
+                        
+                        # Check for any mask fields
+                        for key in micro_batch.keys():
+                            if "mask" in key.lower() and key not in ["attention_mask", "labels"]:
+                                mask_val = micro_batch[key]
+                                if isinstance(mask_val, torch.Tensor):
+                                    f.write(f"\n{key} shape: {mask_val.shape}\n")
+                                    if mask_val.numel() < 500:
+                                        f.write(f"{key} values: {mask_val.tolist()}\n")
+                                    else:
+                                        f.write(f"{key} (first 200): {mask_val.flatten()[:200].tolist()}\n")
+                logger.warning(f"Dumped first batch to {dump_file}")
 
             total_loss = 0
             synchronize()
             start_time = time.time()
-            for micro_batch in micro_batches:
+            for micro_batch_idx, micro_batch in enumerate(micro_batches):
                 environ_meter.add(micro_batch)
                 if args.data.enable_multisource:
                     micro_batch.pop("ds_idx", None)
@@ -394,8 +569,13 @@ def main():
             lr = max(lr_scheduler.get_last_lr())
             train_metrics = environ_meter.step(delta_time, global_step=global_step)
 
-            data_loader_tqdm.set_postfix_str(f"loss: {total_loss:.2f}, grad_norm: {grad_norm:.2f}, lr: {lr:.2e}")
-            data_loader_tqdm.update()
+            # Extract tok/s from metrics (it's in millions, convert to regular tok/s)
+            tok_per_sec = train_metrics.get("tokens_per_second(M)", 0) * 1e6
+            data_loader_tqdm.set_postfix_str(
+                f"loss: {total_loss:.2f}, grad_norm: {grad_norm:.2f}, lr: {lr:.2e}, tok/s: {tok_per_sec:.0f}"
+            )
+            data_loader_tqdm.update(1)
+            data_loader_tqdm.refresh()
 
             if args.train.global_rank == 0:
                 if args.train.use_wandb:
@@ -427,6 +607,11 @@ def main():
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+                
+                # Upload to S3 if configured
+                if args.train.checkpoint_upload_path and args.train.global_rank == 0:
+                    s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
+                    upload_checkpoint_to_s3(save_checkpoint_path, s3_upload_path)
 
         data_loader_tqdm.close()
         start_step = 0

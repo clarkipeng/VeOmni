@@ -486,6 +486,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Number of epochs between two checkpoint saves."},
     )
+    checkpoint_upload_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "S3 path to upload checkpoints to (e.g., s3://bucket/path). If None, no upload."},
+    )
     save_hf_weights: bool = field(
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
@@ -695,6 +699,12 @@ class TrainingArguments:
         """
         if self.rmpad or self.rmpad_with_pos_ids:
             assert max_seq_len is not None and train_size is not None, "max_seq_len and train_size are required."
+            # If train_size is -1, use the whole dataset (approximate total tokens)
+            if train_size == -1:
+                if dataset_length is None:
+                    raise ValueError("train_size=-1 requires dataset_length to be available")
+                # Approximate total tokens: dataset_length * max_seq_len
+                train_size = int(dataset_length * max_seq_len)
             token_micro_bsz = self.micro_batch_size * max_seq_len
             train_size = int(train_size * (1 + self.bsz_warmup_ratio / 2))
             eff_token_rate = (token_micro_bsz - self.dyn_bsz_margin) / token_micro_bsz

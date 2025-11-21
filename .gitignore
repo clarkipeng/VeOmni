@@ -144,6 +144,8 @@ preprocessor_config.json
 special_tokens_map.json
 vocab.json
 processor_config.json
+video_preprocessor_config.json
+chat_template.jinja
 
 # trace file
 *.pt.trace.json
@@ -154,3 +156,10 @@ processor_config.json
 
 # nsys file
 nsysoutput/
+**/*.jpg
+**/veomni_first_batch_dump.txt
+
+# Large datasets
+sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json
+playground/playground/data/eval/mmbench/mmbench_dev_20230712.tsv
+playground/playground/data/eval/mmbench/mmbench_dev_cn_20231003.tsv

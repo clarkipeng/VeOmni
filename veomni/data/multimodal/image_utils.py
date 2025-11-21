@@ -71,11 +71,48 @@ def smart_resize(
 
 
 def load_image_from_path(image: str, **kwargs):
+    import os
     if image.startswith("http://") or image.startswith("https://"):
         response = requests.get(image, stream=True)
         image_obj = Image.open(BytesIO(response.content))
+    elif image.startswith("s3://"):
+        # Handle S3 paths using boto3 (like BlobLearn does)
+        try:
+            import boto3
+            # Parse s3://bucket/key
+            parts = image[5:].split("/", 1)
+            bucket = parts[0]
+            key = parts[1] if len(parts) > 1 else ""
+            s3_client = boto3.client("s3")
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            image_bytes = response["Body"].read()
+            image_obj = Image.open(BytesIO(image_bytes))
+        except ImportError:
+            raise ImportError("boto3 is required for S3 image paths. Install it with: pip install boto3")
     else:
-        image_obj = Image.open(image)
+        # Check if it's a relative path that should be resolved to S3
+        # If image_bucket is provided in kwargs, construct S3 path
+        image_bucket = kwargs.get("image_bucket")
+        if image_bucket and not os.path.isabs(image) and not os.path.exists(image):
+            # Construct S3 path: s3://bucket/path
+            s3_path = f"s3://{image_bucket}/{image}"
+            try:
+                import boto3
+                # Parse s3://bucket/key
+                parts = s3_path[5:].split("/", 1)
+                bucket = parts[0]
+                key = parts[1] if len(parts) > 1 else ""
+                s3_client = boto3.client("s3")
+                response = s3_client.get_object(Bucket=bucket, Key=key)
+                image_bytes = response["Body"].read()
+                image_obj = Image.open(BytesIO(image_bytes))
+            except ImportError:
+                raise ImportError("boto3 is required for S3 image paths. Install it with: pip install boto3")
+            except Exception as e:
+                # If image doesn't exist in S3, raise a more informative error
+                raise FileNotFoundError(f"Image not found at S3 path: {s3_path}. Original error: {e}")
+        else:
+            image_obj = Image.open(image)
     return image_obj.convert("RGB")
 
 
@@ -93,7 +130,7 @@ def load_image(image: ImageInput, **kwargs):
 
 
 def fetch_images(images: List[ImageInput], **kwargs):
-    images = [load_image(image) for image in images]
+    images = [load_image(image, **kwargs) for image in images]
     max_image_nums = kwargs.get("max_image_nums", len(images))
     images = images[:max_image_nums]
     images = [smart_resize(image, **kwargs) for image in images]

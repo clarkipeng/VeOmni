@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import os
 import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -420,6 +421,103 @@ class Qwen2VLChatTemplate(Qwen2VLTemplate):
 
         return tokenized_example
 
+
+class BlobLearnQwenPlanVLChatTemplate(MultimodalChatTemplate):
+    """
+    BlobLearn's Qwen Plan VL chat template that uses Jinja template directly.
+    This template uses tokenizer.apply_chat_template with the loaded Jinja template.
+    """
+    
+    def __init__(self, tokenizer: "PreTrainedTokenizer", **kwargs) -> None:
+        super().__init__(tokenizer)
+        from pathlib import Path
+        
+        self.tokenizer = tokenizer
+        self.image_pad = "<|image_pad|>"
+        self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_pad)
+        
+        template_path = "templates/qwen-plan-vl.jinja"
+        
+        print(f"Template path: {template_path}")
+        maybe_template_path = Path(template_path)
+        if maybe_template_path.exists() and maybe_template_path.is_file():
+            self.chat_template = maybe_template_path.read_text()
+        else:
+            raise FileNotFoundError(f"Template file not found: {template_path}")
+        self.tokenizer.chat_template = self.chat_template
+
+    def get_jinja_template(self) -> str:
+        return self.chat_template
+
+    def encode_messages(
+        self, conversations: Sequence[Dict[str, str]], num_tokens: Dict[str, List[int]] = defaultdict(list), **kwargs
+    ) -> Dict[str, List[int]]:
+        
+        # Convert VeOmni format to BlobLearn format (messages with role/content)
+        messages = []
+        image_token_iter = iter(num_tokens.get("image", []))
+        for conv in conversations:
+            role = conv[0]  # "user" or "assistant"
+            content_items = conv[1:]  # List of (type, value) tuples
+            
+            # Convert content items to BlobLearn format
+            # Template expects: string OR list of dicts with {"type": "text", "text": "..."} or {"type": "image"}
+            content = []
+            for item in content_items:
+                if item[0] == "text":
+                    content.append({"type": "text", "text": item[1]})
+                elif item[0] == "image":
+                    # Add image placeholder - template will insert <|vision_start|><|image_pad|><|vision_end|>
+                    content.append({"type": "image"})
+                    next(image_token_iter, None)
+            
+            # If only one text item, use string format; otherwise use list format
+            if len(content) == 1 and content[0].get("type") == "text":
+                messages.append({"role": role, "content": content[0]["text"]})
+            else:
+                messages.append({"role": role, "content": content})
+                
+        result = self.tokenizer.apply_chat_template(
+            messages,
+            chat_template=self.tokenizer.chat_template,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+            tokenize=True,
+        )
+        
+        # Convert to VeOmni format
+        input_ids = result["input_ids"]
+        attention_mask = result.get("attention_mask", [1] * len(input_ids))
+        # Try both key names (transformers may use different names)
+        assistant_tokens_mask = result.get("assistant_tokens_mask") or result.get("assistant_masks")
+        
+        # Convert assistant_tokens_mask to labels (0 = IGNORE_INDEX, 1 = keep token)
+        # The Jinja template uses {% generation %} blocks which should automatically exclude
+        # tokens outside the block (like <|im_start|>assistant\n) and include tokens inside (like content and <|im_end|>).
+        if assistant_tokens_mask is None:
+            labels = [IGNORE_INDEX] * len(input_ids)
+        else:
+            labels = [token_id if mask == 1 else IGNORE_INDEX for token_id, mask in zip(input_ids, assistant_tokens_mask)]
+        
+        # Handle image tokens - replace image pad tokens with proper indices
+        # All images are input images (including tool images), never output
+        image_mask = torch.tensor(input_ids) == self.image_token_id
+        
+        input_ids_tensor = torch.tensor(input_ids)
+        labels_tensor = torch.tensor(labels)
+        
+        # All image tokens are input images
+        input_ids_tensor[image_mask] = TYPE2INDEX["input"]["image"]
+        # Image tokens in assistant response should still be ignored in labels
+        input_mask = torch.tensor(labels) == IGNORE_INDEX
+        output_image_mask = image_mask & ~input_mask
+        labels_tensor[output_image_mask] = IGNORE_INDEX
+        
+        return {
+            "input_ids": input_ids_tensor.tolist(),
+            "attention_mask": attention_mask,
+            "labels": labels_tensor.tolist(),
+        }
 
 class Qwen25OmniChatTemplate(Qwen2VLChatTemplate):
     system_prompt = (
@@ -1000,6 +1098,7 @@ TEMPLATES = {
     "qwen2vl_pretrain": Qwen2VLPretrainTemplate,
     "qwen2_5omni": Qwen25OmniChatTemplate,
     "qwen2_5vl": Qwen2VLChatTemplate,  # same as qwen2vl
+    "qwen_plan_vl": BlobLearnQwenPlanVLChatTemplate,  # BlobLearn's Qwen Plan VL template
     "janus": JanusChatTemplate,
     "llama": LlamaPretrainTemplate,
     "qwen3moe": Qwen3MoeChatTemplate,

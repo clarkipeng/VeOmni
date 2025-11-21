@@ -266,7 +266,13 @@ def build_mapping_dataset(
                 from ..utils.helper import get_cache_dir
 
                 data_files.append(hf_hub_download(data_path, os.path.split(filename)[-1], cache_dir=get_cache_dir()))
-
+        elif data_path.startswith("s3://"):
+            # For S3 paths, pass directly to load_dataset which handles S3 via fsspec/blobfile
+            # Use glob pattern to match all parquet files in the directory
+            if data_path.endswith("/"):
+                data_path = data_path[:-1]
+            # Try directory first, then single file pattern
+            data_files.append(f"{data_path}/*.parquet")
         elif os.path.isdir(data_path):
             data_files.extend([os.path.join(data_path, fn) for fn in os.listdir(data_path)])
         elif os.path.isfile(data_path):
@@ -317,7 +323,10 @@ def build_iterable_dataset(
                 from ..utils.helper import get_cache_dir
 
                 data_files.append(hf_hub_download(data_path, os.path.split(filename)[-1], cache_dir=get_cache_dir()))
-
+        elif data_path.startswith("s3://"):
+            if data_path.endswith("/"):
+                data_path = data_path[:-1]
+            data_files.append(f"{data_path}/*.parquet")
         elif os.path.isdir(data_path):
             data_files.extend([os.path.join(data_path, fn) for fn in os.listdir(data_path)])
         elif os.path.isfile(data_path):

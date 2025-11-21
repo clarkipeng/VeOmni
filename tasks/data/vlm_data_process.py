@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict
 
 import torch
 
-from veomni.data.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
+from veomni.data.constants import IMAGE_INPUT_INDEX, IMAGE_OUTPUT_INDEX, VIDEO_INPUT_INDEX, VIDEO_OUTPUT_INDEX
 from veomni.data.multimodal import conv_preprocess
 from veomni.data.multimodal.image_utils import fetch_images
 from veomni.data.multimodal.video_utils import fetch_videos
@@ -113,6 +113,14 @@ def process_sample_qwen2_5_vl(
     tokenized_example = {k: torch.tensor(v) for k, v in tokenized_example.items()}
     input_ids = tokenized_example["input_ids"]
 
+    tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
+    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
+    tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
+    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
+    assert not negative_mask.any()
+    
+    input_ids = tokenized_example["input_ids"]
+
     tokenized_example["position_ids"] = position_id_func(
         input_ids=input_ids.unsqueeze(0),
         image_grid_thw=image_grid_thw,
@@ -121,11 +129,6 @@ def process_sample_qwen2_5_vl(
     )["position_ids"]  # (dim, 1, seq_length)
     # Squeezed to (dim, seq_len) for later collator processing
     tokenized_example["position_ids"] = tokenized_example["position_ids"].squeeze().clone()
-
-    tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
-    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
-    tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
-    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
     tokenized_example.update(image_inputs)
     tokenized_example.update(video_inputs)
 
@@ -151,14 +154,67 @@ def process_sample_qwen3_vl(
         start_time = time.time()
 
     source = (
-        kwargs["source_name"] if "source_name" in kwargs else sample["source"]
+        kwargs["source_name"] if "source_name" in kwargs else sample.get("source", None)
     )  # source_name if use multisource_dataset
-    conversations = sample["conversations"] if "conversations" in sample else sample["text"]  # text-only data
-    conversations = conv_preprocess(source, conversations, **kwargs)
+    # Handle different data formats: "messages" (BlobLearn format) or "conversations"/"text" (VeOmni format)
+    if "messages" in sample:
+        # Convert BlobLearn "messages" format to VeOmni format
+        # messages: [{"role": "user", "content": [...]}, ...]
+        # VeOmni expects: [("user", [("text", "..."), ("image", ...)]), ("assistant", [("text", "...")]), ...]
+        conversations = []
+        for msg in sample["messages"]:
+            role = msg["role"]
+            content = msg["content"]
+            # Map role: user->user, assistant->assistant, system->user
+            veomni_role = "user" if role in ["user", "system", "tool"] else "assistant"
+            # Handle content: convert to list of (type, value) tuples
+            if isinstance(content, str):
+                value = [("text", content)]
+            elif isinstance(content, list):
+                # Convert content list to list of (type, value) tuples
+                value = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            value.append(("text", item.get("text", "")))
+                        elif item.get("type") == "image":
+                            # Image will be handled separately via "images" field
+                            # But we still need to mark it in the content
+                            value.append(("image", None))
+                    elif isinstance(item, str):
+                        value.append(("text", item))
+            else:
+                value = [("text", str(content))]
+            # VeOmni expects: (role, content_item1, content_item2, ...)
+            # where each content_item is like ("text", "...") or ("image", None)
+            conversations.append((veomni_role, *value))
+        # Extract images from messages if present
+        if "images" not in sample:
+            images = []
+            for msg in sample["messages"]:
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "image":
+                            # Extract image URL or base64
+                            if "url" in item:
+                                images.append(item["url"])
+                            elif "base64" in item:
+                                images.append(item["base64"])
+            if images:
+                sample["images"] = images
+    elif "conversations" in sample:
+        conversations = sample["conversations"]
+    elif "text" in sample:
+        conversations = sample["text"]
+    else:
+        raise ValueError(f"Sample must have 'messages', 'conversations', or 'text' field. Got keys: {list(sample.keys())}")
+    
+    conversations = conv_preprocess(source, conversations, **kwargs) if source else conversations
 
     token_num_inputs, image_inputs, video_inputs = {}, {}, {}
     image_grid_thw, video_grid_thw = None, None
-    if "images" in sample:
+    if sample.get("images"):
         images = fetch_images(sample["images"], **kwargs)
         image_inputs = processor.image_processor(images=images, return_tensors="pt")
         image_grid_thw = image_inputs["image_grid_thw"]
@@ -177,6 +233,16 @@ def process_sample_qwen3_vl(
     tokenized_example = {k: torch.tensor(v) for k, v in tokenized_example.items()}
     input_ids = tokenized_example["input_ids"]
 
+    tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
+    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
+    tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
+    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
+    # Safety check: replace any remaining negative indices with 0
+    negative_mask = tokenized_example["input_ids"] < 0
+    assert not negative_mask.any()
+    
+    input_ids = tokenized_example["input_ids"]
+
     tokenized_example["position_ids"] = position_id_func(
         input_ids=input_ids.unsqueeze(0),
         image_grid_thw=image_grid_thw,
@@ -185,11 +251,6 @@ def process_sample_qwen3_vl(
     )["position_ids"]  # (dim, 1, seq_length)
     # Squeezed to (dim, seq_len) for later collator processing
     tokenized_example["position_ids"] = tokenized_example["position_ids"].squeeze().clone()
-
-    tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
-    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
-    tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
-    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
     tokenized_example.update(image_inputs)
     tokenized_example.update(video_inputs)
 
