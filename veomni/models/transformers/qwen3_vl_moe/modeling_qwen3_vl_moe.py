@@ -969,11 +969,26 @@ class Qwen3VLMoeTextRotaryEmbedding(nn.Module):
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         # In contrast to other models, Qwen3VLMoe has different position ids for the grids
-        # So we expand the inv_freq to shape (3, ...)
-        if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # position_ids can be:
+        #   - (bs, seq_len) - standard 2D, expand to (3, bs, seq_len)
+        #   - (3, seq_len) - 3D but batch dimension squeezed (bs=1), need to add batch dim: (3, 1, seq_len)
+        #   - (3, bs, seq_len) - already correct 3D format
+        #   - (1, 3, seq_len) - wrong order, transpose to (3, 1, seq_len)
+        if position_ids.ndim == 3:
+            if position_ids.shape[0] == 1 and position_ids.shape[1] == 3:
+                # position_ids is (1, 3, seq_len) - wrong order, transpose to (3, 1, seq_len)
+                position_ids = position_ids.transpose(0, 1)
+        elif position_ids.ndim == 2:
+            if position_ids.shape[0] == 3:
+                # position_ids is (3, seq_len) - already 3D format but batch dimension squeezed (bs=1)
+                # Add batch dimension: (3, seq_len) -> (3, 1, seq_len)
+                position_ids = position_ids.unsqueeze(1)
+            else:
+                # position_ids is (bs, seq_len) - standard 2D, expand to (3, bs, seq_len)
+                position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # Now position_ids is always (3, bs, seq_len)
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
+        position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, seq_len)
 
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
@@ -1053,10 +1068,30 @@ class Qwen3VLMoeTextModel(Qwen3VLMoePreTrainedModel):
             )
 
         # the hard coded `3` is for temporal, height and width.
+        # position_ids should always be 3D: (3, bs, seq_len) for T, H, W dimensions
         if position_ids is None:
+            # cache_position shape: (seq_len,)
+            # Expand to (3, bs, seq_len) for T, H, W dimensions
             position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+        elif position_ids.ndim == 3:
+            # position_ids is 3D - check if it's (1, 3, seq_len) and transpose to (3, 1, seq_len)
+            if position_ids.shape[0] == 1 and position_ids.shape[1] == 3:
+                position_ids = position_ids.transpose(0, 1)
+            elif position_ids.shape[0] != 3:
+                raise ValueError(f"position_ids 3D tensor must have first dim=3, got shape {position_ids.shape}")
         elif position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+            # position_ids is 2D - need to determine if it's (bs, seq_len) or (3, seq_len)
+            if position_ids.shape[0] == 3:
+                # position_ids is (3, seq_len) - already 3D format but batch dimension squeezed (bs=1)
+                # Add batch dimension: (3, seq_len) -> (3, 1, seq_len)
+                position_ids = position_ids.unsqueeze(1)
+            else:
+                # position_ids is (bs, seq_len) - standard 2D, expand to (3, bs, seq_len)
+                position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # Now position_ids is always (3, bs, seq_len) - ensure batch dimension exists
+        assert position_ids.ndim == 3 and position_ids.shape[0] == 3, (
+            f"position_ids must be 3D with shape (3, bs, seq_len), but got shape {position_ids.shape}"
+        )
 
         if position_ids.ndim == 3 and position_ids.shape[0] == 4:
             text_position_ids = position_ids[0]
