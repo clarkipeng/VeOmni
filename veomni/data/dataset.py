@@ -395,12 +395,29 @@ def build_interleave_dataset(
     elif datasets_type == "mapping":
         logger.info_rank0("Start building mapping multisource dataset")
 
+        dataset_sizes = []
         for idx, source in enumerate(sources):
             dataset = build_mapping_dataset(source, namespace=namespace)
             ds = dataset._data
+            dataset_size = len(ds)
+            dataset_sizes.append(dataset_size)
+            logger.info_rank0(f"Dataset {source_names[idx]} ({source}): {dataset_size} samples")
             ds = ds.add_column("ds_idx", [idx] * len(ds))
             ds = ds.add_column("source_name", [source_names[idx]] * len(ds))
             datasets.append(ds)
+        
+        # Auto-calculate weights based on dataset sizes if weights is "auto" or None
+        if weights == "auto" or weights is None:
+            total_size = sum(dataset_sizes)
+            if total_size > 0:
+                weights = [size / total_size for size in dataset_sizes]
+                logger.info_rank0(f"Auto-calculated weights based on dataset sizes: {weights}")
+                logger.info_rank0(f"Dataset sizes: {dict(zip(source_names, dataset_sizes))}")
+            else:
+                # Fallback to equal weights if all datasets are empty
+                weights = [1.0 / len(sources)] * len(sources)
+                logger.info_rank0(f"All datasets empty, using equal weights: {weights}")
+        
         return InterleavedMappingDataset(
             interleave_datasets(datasets=datasets, probabilities=weights, seed=seed),
             transform=transform,

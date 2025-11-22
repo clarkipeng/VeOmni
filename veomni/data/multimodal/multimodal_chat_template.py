@@ -436,7 +436,7 @@ class BlobLearnQwenPlanVLChatTemplate(MultimodalChatTemplate):
         self.image_pad = "<|image_pad|>"
         self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_pad)
         
-        template_path = "templates/qwen-plan-vl.jinja"
+        template_path = kwargs.get("template_path", "templates/qwen-plan-vl-pretrain.jinja")
         
         print(f"Template path: {template_path}")
         maybe_template_path = Path(template_path)

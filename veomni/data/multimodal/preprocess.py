@@ -363,6 +363,89 @@ def voice_assistant_preprocess(conversations, **kwargs):
     return constructed_conversation
 
 
-# @PREPROCESSOR_REGISTRY.register("your_dataset_name")
-# def your_dataset_preprocess(conversations, **kwargs):
-#     ...
+def messages_format_preprocess(conversations, **kwargs):
+    """
+    Preprocess conversations that are already in messages format with 'role' and 'content' fields.
+    This handles the standard format where messages have role (user/assistant) and content (text or list of content items).
+    """
+    constructed_conversation = []
+    for msg in conversations:
+        role = msg.get("role", "").lower()
+        content = msg.get("content", "")
+        
+        # Skip if role is not user or assistant
+        if role not in ["user", "assistant"]:
+            continue
+        
+        # Handle content - can be string or list of content items
+        if isinstance(content, str):
+            # Simple text content
+            constructed_conversation.append([role, ("text", content)])
+        elif isinstance(content, list):
+            # Content is a list of items (e.g., [{"type": "text", "text": "..."}, {"type": "image"}])
+            content_items = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type", "text")
+                    if item_type == "text":
+                        content_items.append(("text", item.get("text", "")))
+                    elif item_type == "image":
+                        content_items.append(("image", None))
+                    elif item_type == "video":
+                        content_items.append(("video", None))
+                    elif item_type == "audio":
+                        content_items.append(("audio", None))
+                elif isinstance(item, str):
+                    # Fallback: treat string as text
+                    content_items.append(("text", item))
+            if content_items:
+                constructed_conversation.append([role] + content_items)
+        else:
+            # Fallback: treat as text
+            constructed_conversation.append([role, ("text", str(content))])
+    
+    return constructed_conversation
+
+
+DATASETS = {
+    "sharegpt4v_pretrain": sharegpt4v_pretrain_preprocess,
+    "sharegpt4v_captioner": sharegpt4v_pretrain_preprocess,
+    "sharegpt4v_captioner_sft": sharegpt4v_sft_preprocess,
+    "sharegpt4v_sft": sharegpt4v_sft_preprocess,
+    "doom": doom_preprocess,
+    "seed_edit": seed_edit_preprocess,
+    "imagenet1k": imagenet1k_preprocess,
+    "imagenet1k_caption": imagenet1k_caption_preprocess,
+    "fineweb_100BT": fineweb_preprocess,
+    "wikihow_ct_0904": wikihow_preprocess,
+    "wit": wit_preprocess,
+    "Detailed_Caption": detailed_caption_preprocess,
+    "sam": sam_preprocess,
+    "ArxivQA": arxivqa_preprocess,
+    "DenseFusion-1M": densefusion_preprocess,
+    "DenseFusion-4V-100k": densefusion_preprocess,
+    "mmsci": mmsci_preprocess,
+    "pixelprose": pixelprose_preprocess,
+    "pixelprose_gen": pixelprose_gen_preprocess,
+    "chart_to_table": chart_to_table_preprocess,
+    "CHartQA": chartqa_preprocess,
+    "sam_gen": sam_gen_preprocess,
+    "megalith": megalith_preprocess,
+    "journeydb": journeydb_preprocess,
+    "dalle3_1m": dalle3_1m_preprocess,
+    "LLaVA-Video-178K": llava_video_preprocess,
+    "VoiceAssistant": voice_assistant_preprocess,
+    # Pretraining datasets with messages format
+    "rephrase-pretrain-vlm": messages_format_preprocess,
+    "qa-freeform-vlm": messages_format_preprocess,
+    "qa-verify-yes-vlm": messages_format_preprocess,
+    "qa-verify-no-vlm": messages_format_preprocess,
+    "cad-document-max-vlm": messages_format_preprocess,
+}
+
+
+def conv_preprocess(source: str, converstation: List[Dict[str, Any]], **kwargs):
+    if source not in DATASETS:
+        raise ValueError(f"Unknown dataset name: {source}")
+
+    return DATASETS[source](converstation, **kwargs)

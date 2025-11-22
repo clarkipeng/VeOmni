@@ -1,0 +1,16 @@
+sources:
+  - s3://camfer-spice/gcd-run-42/rephrase-pretrain-vlm/train
+  - s3://camfer-spice/gcd-run-42/qa-freeform-vlm/train
+  - s3://camfer-spice/gcd-run-42/qa-verify-yes-vlm/train
+  - s3://camfer-spice/gcd-run-42/qa-verify-no-vlm/train
+  - s3://camfer-spice/gcd-run-42/cad-document-max-vlm/train
+names:
+  - rephrase-pretrain-vlm
+  - qa-freeform-vlm
+  - qa-verify-yes-vlm
+  - qa-verify-no-vlm
+  - cad-document-max-vlm
+schedule:
+  - schedule_type: const
+    weights: auto
+

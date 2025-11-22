@@ -36,10 +36,12 @@ def _parse_multisource_config(multisource_config: dict):
             )
             f"{source_num} vs {value['init_weights']} vs {value['end_weights']}."
         else:
-            assert len(value["weights"]) == source_num, (
-                "source_num is not equal to length of weights, "
-                + f"source_num vs weights: {source_num} vs {value['weights']}."
-            )
+            # Allow "auto" or None for automatic weight calculation
+            if value.get("weights") not in [None, "auto"]:
+                assert len(value["weights"]) == source_num, (
+                    "source_num is not equal to length of weights, "
+                    + f"source_num vs weights: {source_num} vs {value['weights']}."
+                )
     if "concat_sources" in multisource_config:
         assert len(multisource_config["concat_sources"]) == source_num, (
             "source_num is not equal to length of"

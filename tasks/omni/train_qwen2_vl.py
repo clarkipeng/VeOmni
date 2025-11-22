@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -99,7 +99,7 @@ def upload_checkpoint_to_s3(local_path: str, s3_path: str) -> None:
         logger.error(f"Unexpected error during S3 upload: {e}")
 
 
-MAX_PIXELS = 256 * 28 * 28
+MAX_PIXELS = 128 * 28 * 28
 ROLE_MAPPING = {
     "human": "user",
     "gpt": "assistant",
@@ -186,6 +186,14 @@ def get_param_groups(model: "torch.nn.Module", default_lr: float, vit_lr: float)
 
 
 @dataclass
+class MyDataArguments(DataArguments):
+    val_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to validation dataset. Can be a single path or multisource YAML config."},
+    )
+
+
+@dataclass
 class MyTrainingArguments(TrainingArguments):
     freeze_vit: bool = field(
         default=False,
@@ -195,12 +203,16 @@ class MyTrainingArguments(TrainingArguments):
         default=1e-6,
         metadata={"help": "Maximum learning rate for vit parameters."},
     )
+    eval_steps: Optional[int] = field(
+        default=None,
+        metadata={"help": "Run evaluation every X steps. If None, only evaluate at end of epoch."},
+    )
 
 
 @dataclass
 class Arguments:
     model: "ModelArguments" = field(default_factory=ModelArguments)
-    data: "DataArguments" = field(default_factory=DataArguments)
+    data: "MyDataArguments" = field(default_factory=MyDataArguments)
     train: "MyTrainingArguments" = field(default_factory=MyTrainingArguments)
 
 
@@ -286,7 +298,6 @@ def main():
     args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, dataset_length)
 
     train_dataloader = build_dataloader(
-        dataloader_type=args.data.dataloader_type,
         dataset=train_dataset,
         micro_batch_size=args.train.micro_batch_size,
         global_batch_size=args.train.global_batch_size,
@@ -305,6 +316,54 @@ def main():
         pin_memory=args.data.pin_memory,
         prefetch_factor=args.data.prefetch_factor,
     )
+
+    # Build validation dataset if val_path is provided
+    val_dataloader = None
+    if args.data.val_path:
+        logger.info_rank0("Start building validation dataset")
+        val_enable_multisource = args.data.val_path.endswith(".yaml")
+        val_dataset = None
+        if val_enable_multisource:
+            val_dataset = build_interleave_dataset(
+                args.data.val_path, args.data.datasets_type, transform=transform, seed=args.train.seed
+            )
+        elif args.data.datasets_type == "iterable":
+            val_dataset = build_iterative_dataset(
+                args.data.val_path, transform=transform, seed=args.train.seed, source_name=args.data.source_name
+            )
+        elif args.data.datasets_type == "mapping":
+            val_dataset = build_mapping_dataset(
+                args.data.val_path, transform=transform, source_name=args.data.source_name
+            )
+        
+        if val_dataset is not None:
+            # Calculate approximate validation steps
+            val_steps = 100  # Default
+            if hasattr(val_dataset, "__len__"):
+                val_steps = max(1, len(val_dataset) // args.train.global_batch_size)
+            
+            val_dataloader = build_dataloader(
+                dataset=val_dataset,
+                micro_batch_size=args.train.micro_batch_size,
+                global_batch_size=args.train.global_batch_size,
+                dataloader_batch_size=args.train.dataloader_batch_size,
+                seed=args.train.seed,
+                collate_fn=data_collate_fn,
+                max_seq_len=args.data.max_seq_len,
+                train_steps=val_steps,
+                rmpad=args.train.rmpad,
+                rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
+                bsz_warmup_ratio=0,  # No warmup for validation
+                dyn_bsz_margin=args.train.dyn_bsz_margin,
+                dyn_bsz_buffer_size=args.train.dyn_bsz_buffer_size,
+                num_workers=args.data.num_workers,
+                prefetch_factor=args.data.prefetch_factor,
+                pin_memory=args.data.pin_memory,
+                drop_last=False,  # Don't drop last batch in validation
+            )
+            logger.info_rank0(f"Validation dataset built with {len(val_dataset) if hasattr(val_dataset, '__len__') else 'unknown'} samples")
+    else:
+        raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
 
     fsdp_kwargs = {}
     if args.train.freeze_vit:
@@ -426,107 +485,47 @@ def main():
             if global_step == 1 and args.train.local_rank == 0:
                 helper.print_example(example=micro_batches[0], rank=args.train.local_rank)
                 
-                # Dump first batch sequence to file for debugging
+                # Dump first batch to file for debugging
                 dump_file = Path(args.train.output_dir) / "veomni_first_batch_dump.txt"
                 dump_file.parent.mkdir(parents=True, exist_ok=True)
+                tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
+                
                 with open(dump_file, "w", encoding="utf-8") as f:
                     f.write("=" * 80 + "\n")
                     f.write("VeOmni First Batch Sequence Dump\n")
                     f.write("=" * 80 + "\n\n")
+                    
                     for mb_idx, micro_batch in enumerate(micro_batches):
                         f.write(f"\n--- Micro Batch {mb_idx} ---\n\n")
                         input_ids = micro_batch.get("input_ids")
                         labels = micro_batch.get("labels")
-                        attention_mask = micro_batch.get("attention_mask")
                         
                         if input_ids is not None:
                             f.write(f"input_ids shape: {input_ids.shape}\n")
-                            f.write(f"input_ids (first 200 tokens): {input_ids[0, :200].tolist()}\n")
-                            # Decode tokens
                             try:
-                                # Use the processor that was already built earlier
-                                tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
                                 decoded = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-                                f.write(f"\nDecoded input_ids:\n{decoded}\n")
+                                f.write(f"Decoded (first 500 chars): {decoded[:500]}...\n\n")
                             except Exception as e:
-                                f.write(f"\nCould not decode tokens: {e}\n")
+                                f.write(f"Could not decode: {e}\n\n")
                         
                         if labels is not None:
-                            f.write(f"\nlabels shape: {labels.shape}\n")
                             num_valid = (labels != -100).sum().item()
                             num_total = labels.numel()
-                            f.write(f"valid labels: {num_valid}/{num_total} ({100*num_valid/num_total:.2f}%)\n")
-                            f.write(f"labels (first 200 tokens): {labels[0, :200].tolist()}\n")
-                            # Show which positions are valid
-                            valid_positions = (labels[0] != -100).nonzero(as_tuple=True)[0].tolist()
-                            f.write(f"valid label positions (first 100): {valid_positions[:100]}\n")
+                            num_masked = (labels == -100).sum().item()
+                            f.write(f"Labels: {num_valid}/{num_total} valid ({100*num_valid/num_total:.2f}%), {num_masked} masked\n")
                             
-                            # Show tokens INCLUDED in loss, in segments
+                            # Check if image tokens are properly masked
                             if input_ids is not None:
-                                f.write(f"\n--- Tokens INCLUDED in Loss (shown in segments) ---\n")
-                                f.write(f"Total valid positions: {len(valid_positions)}\n\n")
-                                
-                                if len(valid_positions) > 0:
-                                    try:
-                                        tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
-                                        
-                                        # Group consecutive positions into segments
-                                        segments = []
-                                        current_segment = [valid_positions[0]]
-                                        for i in range(1, len(valid_positions)):
-                                            if valid_positions[i] == valid_positions[i-1] + 1:
-                                                current_segment.append(valid_positions[i])
-                                            else:
-                                                segments.append(current_segment)
-                                                current_segment = [valid_positions[i]]
-                                        segments.append(current_segment)
-                                        
-                                        f.write(f"Found {len(segments)} continuous segments of valid tokens\n\n")
-                                        
-                                        # Show each segment
-                                        for seg_idx, segment in enumerate(segments):
-                                            start_pos = segment[0]
-                                            end_pos = segment[-1]
-                                            segment_token_ids = input_ids[0, start_pos:end_pos+1].tolist()
-                                            segment_labels = labels[0, start_pos:end_pos+1].tolist()
-                                            
-                                            f.write(f"--- Segment {seg_idx + 1}/{len(segments)}: positions {start_pos}-{end_pos} ({len(segment)} tokens) ---\n")
-                                            f.write(f"Token IDs: {segment_token_ids[:50]}{'...' if len(segment_token_ids) > 50 else ''}\n")
-                                            f.write(f"Labels: {segment_labels[:50]}{'...' if len(segment_labels) > 50 else ''}\n")
-                                            
-                                            # Decode the segment
-                                            try:
-                                                decoded_segment = tokenizer.decode(segment_token_ids, skip_special_tokens=False)
-                                                f.write(f"Decoded text:\n{decoded_segment}\n")
-                                            except Exception as e:
-                                                f.write(f"Could not decode segment: {e}\n")
-                                            f.write("\n")
-                                            
-                                            # Limit to first 20 segments to avoid huge files
-                                            if seg_idx >= 19:
-                                                remaining = len(segments) - 20
-                                                if remaining > 0:
-                                                    f.write(f"... ({remaining} more segments omitted)\n")
-                                                break
-                                    except Exception as e:
-                                        f.write(f"\nCould not process valid tokens: {e}\n")
-                        
-                        if attention_mask is not None:
-                            f.write(f"\nattention_mask shape: {attention_mask.shape}\n")
-                            num_attn = attention_mask.sum().item()
-                            f.write(f"attention_mask sum: {num_attn}/{attention_mask.numel()}\n")
-                        
-                        # Check for any mask fields
-                        for key in micro_batch.keys():
-                            if "mask" in key.lower() and key not in ["attention_mask", "labels"]:
-                                mask_val = micro_batch[key]
-                                if isinstance(mask_val, torch.Tensor):
-                                    f.write(f"\n{key} shape: {mask_val.shape}\n")
-                                    if mask_val.numel() < 500:
-                                        f.write(f"{key} values: {mask_val.tolist()}\n")
-                                    else:
-                                        f.write(f"{key} (first 200): {mask_val.flatten()[:200].tolist()}\n")
-                logger.warning(f"Dumped first batch to {dump_file}")
+                                image_mask = (input_ids == IMAGE_INPUT_INDEX) | (input_ids == 0)
+                                image_positions = image_mask[0].nonzero(as_tuple=True)[0].tolist()
+                                if len(image_positions) > 0:
+                                    image_labels = labels[0, image_positions[:min(50, len(image_positions))]]
+                                    num_image_masked = (image_labels == -100).sum().item()
+                                    f.write(f"Image tokens: {len(image_positions)} found, {num_image_masked}/{len(image_labels)} masked in labels\n")
+                                    if num_image_masked < len(image_labels):
+                                        f.write(f"WARNING: Some image tokens are NOT masked in labels!\n")
+                
+                logger.info_rank0(f"Dumped first batch to {dump_file}")
 
             total_loss = 0
             synchronize()
@@ -544,6 +543,7 @@ def main():
                 }
                 with model_fwd_context:
                     loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss / len(micro_batches)
+                # loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss / len(micro_batches)
 
                 with model_bwd_context:
                     loss.backward()
@@ -588,7 +588,54 @@ def main():
                 profiler.step()
                 if global_step == args.train.profile_end_step:
                     profiler.stop()
-                    helper.upload_trace(args.train.wandb_project, args.train.wandb_name, args.train.profile_trace_dir)
+                    print(profiler.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+            # Run validation at specified steps if eval_steps is set
+            if val_dataloader is not None and args.train.eval_steps and global_step % args.train.eval_steps == 0:
+                logger.info_rank0(f"Running validation at step {global_step}...")
+                model.eval()
+                val_loss = 0.0
+                val_num_batches = 0
+                
+                with torch.no_grad():
+                    val_iterator = iter(val_dataloader)
+                    try:
+                        # Limit validation to a reasonable number of batches
+                        max_val_batches = 50
+                        for _ in range(max_val_batches):
+                            try:
+                                micro_batches: List[Dict[str, Any]] = next(val_iterator)
+                            except StopIteration:
+                                break
+                            
+                            for micro_batch in micro_batches:
+                                if args.data.enable_multisource:
+                                    micro_batch.pop("ds_idx", None)
+                                    micro_batch.pop("source_name", None)
+                                
+                                micro_batch = {
+                                    k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
+                                    for k, v in micro_batch.items()
+                                }
+                                
+                                with model_fwd_context:
+                                    loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
+                                
+                                val_loss += loss.item()
+                                val_num_batches += 1
+                                del micro_batch
+                    except Exception as e:
+                        logger.warning(f"Error during validation: {e}")
+                
+                # Aggregate validation loss across all processes
+                if val_num_batches > 0:
+                    val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
+                    val_loss = val_loss / val_num_batches
+                    logger.info_rank0(f"Validation loss at step {global_step}: {val_loss:.4f} (over {val_num_batches} batches)")
+                    
+                    if args.train.global_rank == 0 and args.train.use_wandb:
+                        wandb.log({"validation/loss": val_loss}, step=global_step)
+                
+                model.train()
 
             if args.train.save_steps and global_step % args.train.save_steps == 0:
                 helper.empty_cache()
@@ -616,6 +663,56 @@ def main():
         data_loader_tqdm.close()
         start_step = 0
         helper.print_device_mem_info(f"VRAM usage after epoch {epoch + 1}")
+        
+        # Run validation at end of epoch if val_dataloader is available
+        if val_dataloader is not None:
+            logger.info_rank0("Running validation...")
+            model.eval()
+            val_loss = 0.0
+            val_num_batches = 0
+            val_num_samples = 0
+            
+            with torch.no_grad():
+                val_iterator = iter(val_dataloader)
+                try:
+                    while True:
+                        try:
+                            micro_batches: List[Dict[str, Any]] = next(val_iterator)
+                        except StopIteration:
+                            break
+                        
+                        for micro_batch in micro_batches:
+                            if args.data.enable_multisource:
+                                micro_batch.pop("ds_idx", None)
+                                micro_batch.pop("source_name", None)
+                            
+                            micro_batch = {
+                                k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
+                                for k, v in micro_batch.items()
+                            }
+                            
+                            with model_fwd_context:
+                                loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
+                            
+                            val_loss += loss.item()
+                            val_num_batches += 1
+                            val_num_samples += micro_batch.get("input_ids", torch.tensor([])).shape[0] if isinstance(micro_batch.get("input_ids"), torch.Tensor) else 1
+                            
+                            del micro_batch
+                except Exception as e:
+                    logger.warning(f"Error during validation: {e}")
+            
+            # Aggregate validation loss across all processes
+            val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
+            if val_num_batches > 0:
+                val_loss = val_loss / val_num_batches
+                logger.info_rank0(f"Validation loss at epoch {epoch + 1}: {val_loss:.4f} (over {val_num_batches} batches)")
+                
+                if args.train.global_rank == 0 and args.train.use_wandb:
+                    wandb.log({"validation/loss": val_loss, "validation/epoch": epoch + 1}, step=global_step)
+            
+            model.train()
+        
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
             save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")

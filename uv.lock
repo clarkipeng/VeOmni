@@ -525,6 +525,16 @@ wheels = [
 ]
 
 [[package]]
+name = "dion"
+version = "0.1.0"
+source = { git = "https://github.com/microsoft/dion.git?rev=0360f9b#0360f9b0369603ecfa19de5128f56c983f1ac7d9" }
+dependencies = [
+    { name = "numpy" },
+    { name = "triton", version = "3.4.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-6-veomni-gpu') or (extra == 'extra-6-veomni-gpu' and extra == 'extra-6-veomni-npu')" },
+    { name = "triton", version = "3.5.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'linux' and extra == 'extra-6-veomni-gpu') or (extra == 'extra-6-veomni-gpu' and extra == 'extra-6-veomni-npu')" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2916,6 +2926,7 @@ dit = [
 ]
 gpu = [
     { name = "boto3" },
+    { name = "dion" },
     { name = "flash-attn" },
     { name = "kernels" },
     { name = "liger-kernel" },

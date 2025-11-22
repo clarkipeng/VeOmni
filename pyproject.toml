@@ -76,6 +76,7 @@ gpu =[
     "pre-commit>=4.3.0",
     "transformers[serving]>=4.57.0",
     "flash-attn",
+    "dion",
 ]
 megatron = [
   "megatron-energon>=7.2.1"
@@ -149,6 +150,9 @@ dion = [{ git = "https://github.com/microsoft/dion.git", rev = "0360f9b" }]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "92ed8b3" }
 liger-kernel = { git = "https://github.com/linkedin/Liger-Kernel", rev = '7dd8ecc' }
 solidworks_rollout = { git = "https://github.com/camfer-dev/BlobWorksSharp.git", subdirectory = "environments/solidworks_rollout" }
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [[tool.uv.index]]
 name = "pytorch"

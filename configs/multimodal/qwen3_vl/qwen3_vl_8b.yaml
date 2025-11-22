@@ -1,0 +1,59 @@
+model:
+  model_path: Qwen/Qwen3-VL-8B-Instruct
+  attn_implementation: flash_attention_2
+
+data:
+  train_path: configs/multimodal/data/multisource_pretrain.yaml
+  val_path: configs/multimodal/data/multisource_pretrain_val.yaml  # Validation dataset
+  enable_multisource: true
+  datasets_type: mapping
+  dataloader_type: native # or streaming
+  num_workers: 8
+  data_type: conversation
+  chat_template: qwen_plan_vl
+  template_path: templates/qwen-plan-vl-pretrain.jinja
+  max_seq_len: 32768
+  train_size: -1
+  mm_configs:
+    source: null  # Will handle "messages" format automatically
+    image_bucket: grabcad  # S3 bucket for images
+
+train:
+  enable_compile: true
+
+  # enable_profiling: true
+  enable_profiling: false
+  # profile_start_step: 5
+  # profile_end_step: 6
+
+  freeze_vit: false
+  vit_lr: 1.0e-6
+  lr: 5.0e-5
+  lr_decay_style: cosine
+  weight_decay: 0.1
+  output_dir: qwen3_vl_8b
+  data_parallel_mode: fsdp2
+  enable_reentrant: false
+  use_wandb: true
+  wandb_project: "gcd-run-42_vl_pt"
+  wandb_name: "pure_5e-5_vit_freeze"
+  rmpad: false
+  rmpad_with_pos_ids: true
+  ulysses_parallel_size: 1
+  num_train_epochs: 1
+  micro_batch_size: 1
+  global_batch_size: 8
+  max_steps: 8000
+  save_steps: 2000
+  init_device: meta
+  ckpt_manager: dcp
+  save_hf_weights: false
+  allow_cuda_launch_blocking: false
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/pure_5e-5_vit_freeze_halfseq  # S3 path for auto-upload
+  # memory ops
+  enable_mixed_precision: true
+  optimizer: "anyprecision_adamw"
+  enable_gradient_checkpointing: true  # Reduces memory by trading compute for memory
+  enable_activation_offload: true  # Offload activations to CPU to save GPU memory
+  activation_gpu_limit: 50.0  # GB of activations to keep on GPU (adjust based on available memory)
+  empty_cache_steps: 5  # Clear cache more frequently to reduce fragmentation
