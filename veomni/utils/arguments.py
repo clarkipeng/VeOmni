@@ -312,7 +312,7 @@ class TrainingArguments:
         metadata={"help": "Parameters without weight decay, for example, bias."},
     )
 
-    optimizer: Literal["adamw", "anyprecision_adamw", 'muon'] = field(
+    optimizer: Literal["adamw", "anyprecision_adamw", "muon"] = field(
         default="adamw",
         metadata={"help": "Optimizer. Default to adamw."},
     )
