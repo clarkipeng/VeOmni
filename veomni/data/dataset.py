@@ -328,7 +328,13 @@ def build_iterable_dataset(
                 data_path = data_path[:-1]
             data_files.append(f"{data_path}/*.parquet")
         elif os.path.isdir(data_path):
-            data_files.extend([os.path.join(data_path, fn) for fn in os.listdir(data_path)])
+            # Filter for supported extensions and ignore hidden files
+            supported_exts = {".parquet", ".jsonl", ".json", ".csv", ".arrow"}
+            data_files.extend([
+                os.path.join(data_path, fn) 
+                for fn in os.listdir(data_path) 
+                if not fn.startswith(".") and os.path.splitext(fn)[1] in supported_exts
+            ])
         elif os.path.isfile(data_path):
             data_files.append(data_path)
         else:

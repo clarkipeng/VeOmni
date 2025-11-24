@@ -1,16 +1,20 @@
 sources:
   - s3://camfer-spice/gcd-run-42/rephrase-pretrain-vlm/train
+  - s3://camfer-spice/gcd-run-42/dialogue-pretrain-vlm/train
   - s3://camfer-spice/gcd-run-42/qa-freeform-vlm/train
   - s3://camfer-spice/gcd-run-42/qa-verify-yes-vlm/train
   - s3://camfer-spice/gcd-run-42/qa-verify-no-vlm/train
   - s3://camfer-spice/gcd-run-42/cad-document-max-vlm/train
+  - sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json
 names:
   - rephrase-pretrain-vlm
+  - dialogue-pretrain-vlm
   - qa-freeform-vlm
   - qa-verify-yes-vlm
   - qa-verify-no-vlm
   - cad-document-max-vlm
+  - sharegpt4v_captioner_sft
 schedule:
   - schedule_type: const
-    weights: auto
+    weights: [0.25, 0.15, 0.05, 0.05, 0.05, 0.2, 0.25]  # CAD: 80%, ShareGPT: 20%
 

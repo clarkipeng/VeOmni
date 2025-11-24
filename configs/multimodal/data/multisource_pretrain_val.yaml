@@ -1,11 +1,13 @@
 sources:
   - s3://camfer-spice/gcd-run-42/rephrase-pretrain-vlm/val
+  - s3://camfer-spice/gcd-run-42/dialogue-pretrain-vlm/val
   - s3://camfer-spice/gcd-run-42/qa-freeform-vlm/val
   - s3://camfer-spice/gcd-run-42/qa-verify-yes-vlm/val
   - s3://camfer-spice/gcd-run-42/qa-verify-no-vlm/val
   - s3://camfer-spice/gcd-run-42/cad-document-max-vlm/val
 names:
   - rephrase-pretrain-vlm
+  - dialogue-pretrain-vlm
   - qa-freeform-vlm
   - qa-verify-yes-vlm
   - qa-verify-no-vlm

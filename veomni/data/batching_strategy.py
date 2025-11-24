@@ -14,6 +14,7 @@
 
 
 from typing import Any, Dict
+import torch
 
 
 class DynBszBuffer:
@@ -41,12 +42,13 @@ class DynBszBuffer:
         self._buffer_sample_lens.append(item["attention_mask"].sum())
         self.all_token_cnt += self._buffer_sample_lens[-1]
 
-    def get_samples(self, n_token_per_iter: int, force: bool = True):
+    def get_samples(self, n_token_per_iter: int, force: bool = True, max_seq_len: int = None, truncate: bool = True):
         """
         get samples from the buffer.
         Args:
             n_token_per_iter: the number of tokens to get.
             force: if True, the first sample will be returned even if it is not full.
+            max_seq_len: if specified, enforces an absolute maximum sequence length.
         Returns:
             samples: a list of samples.
         """
@@ -54,9 +56,18 @@ class DynBszBuffer:
         samples = []
         while self.cur_idx < len(self._buffer) and cum_seq_len < n_token_per_iter:
             seq_len = self._buffer_sample_lens[self.cur_idx]
+            if truncate and max_seq_len is not None and seq_len > max_seq_len:
+                item = self._buffer[self.cur_idx]
+                keys_to_truncate = ["input_ids", "attention_mask", "labels", "position_ids"] 
+                for k in keys_to_truncate:
+                    if item[k].shape[0] == seq_len:
+                        item[k] = item[k][:max_seq_len]
+                    elif item[k].ndim > 1 and item[k].shape[-1] == seq_len:
+                        item[k] = item[k][..., :max_seq_len]
+                self._buffer_sample_lens[self.cur_idx] = seq_len = max_seq_len
             if self.cur_idx not in self.del_idxs and (
                 (force is True and cum_seq_len == 0) or (seq_len <= n_token_per_iter - cum_seq_len)
-            ):
+            ) and (max_seq_len is None or cum_seq_len + seq_len <= max_seq_len):
                 cum_seq_len += seq_len
                 samples.append(self._buffer[self.cur_idx])
                 self.del_idxs.append(self.cur_idx)
@@ -144,6 +155,7 @@ class TextBatchingStrategy(BaseBatchingStrategy):
         buffer_size: int = 500,
         bsz_warmup_steps: int = -1,
         bsz_warmup_init_mbtoken: int = 200,
+        max_seq_len: int = None,
     ) -> None:
         super().__init__()
         self._step = 0
@@ -152,6 +164,7 @@ class TextBatchingStrategy(BaseBatchingStrategy):
         self.buffer_size = buffer_size  # minimum samples in buffer
         self.buffer = DynBszBuffer()
         self.bsz_warmup_init_mbtoken = bsz_warmup_init_mbtoken
+        self.max_seq_len = max_seq_len
         assert self.bsz_warmup_init_mbtoken >= 0
 
         self.packer = IdentityPacker(
@@ -203,7 +216,7 @@ class TextBatchingStrategy(BaseBatchingStrategy):
         n_iter = int(cur_token_micro_bsz // n_token_per_iter)
         data = []
         for i in range(n_iter):
-            samples = self.buffer.get_samples(n_token_per_iter)
+            samples = self.buffer.get_samples(n_token_per_iter, max_seq_len=self.max_seq_len)
             if self.packer:
                 samples = self.packer(samples)  # maybe packed into one sample, but wrapped in list.
             data.extend(samples)

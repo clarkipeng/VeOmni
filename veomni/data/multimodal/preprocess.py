@@ -437,6 +437,7 @@ DATASETS = {
     "VoiceAssistant": voice_assistant_preprocess,
     # Pretraining datasets with messages format
     "rephrase-pretrain-vlm": messages_format_preprocess,
+    "dialogue-pretrain-vlm": messages_format_preprocess,
     "qa-freeform-vlm": messages_format_preprocess,
     "qa-verify-yes-vlm": messages_format_preprocess,
     "qa-verify-no-vlm": messages_format_preprocess,

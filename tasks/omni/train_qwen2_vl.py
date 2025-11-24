@@ -14,7 +14,7 @@ import wandb
 from PIL import Image
 from tqdm import trange
 
-from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict
+from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict, dcp_to_torch_state_dict
 from veomni.data import (
     OmniDataCollatorWithPacking,
     OmniDataCollatorWithPadding,
@@ -99,6 +99,49 @@ def upload_checkpoint_to_s3(local_path: str, s3_path: str) -> None:
         logger.error(f"Unexpected error during S3 upload: {e}")
 
 
+def save_and_upload_checkpoint(
+    Checkpointer,
+    save_checkpoint_path: str,
+    state: dict,
+    global_step: int,
+    args,
+    model_config,
+    processor,
+) -> str:
+    """
+    Save DCP checkpoint, convert to HF format, and upload to S3.
+    
+    Args:
+        Checkpointer: Checkpoint manager
+        save_checkpoint_path: Base path for checkpoints
+        state: State dict containing model, optimizer, extra_state
+        global_step: Current global step
+        args: Training arguments
+        model_config: Model configuration
+        processor: Model processor
+    
+    Returns:
+        checkpoint_path: Full path to the saved checkpoint
+    """
+    checkpoint_path = os.path.join(save_checkpoint_path, f"global_step_{global_step}")
+    Checkpointer.save(save_checkpoint_path, state, global_steps=global_step)
+    dist.barrier()
+    logger.info_rank0(f"Distributed checkpoint saved at {checkpoint_path} successfully!")
+    
+    # Convert to HF and upload to S3 if configured
+    if args.train.checkpoint_upload_path and args.train.global_rank == 0:
+        logger.info_rank0("Converting checkpoint to HuggingFace format for S3 upload...")
+        hf_checkpoint_path = f"{checkpoint_path}_hf"
+        state_dict = dcp_to_torch_state_dict(save_checkpoint_path=checkpoint_path)
+        save_model_weights(hf_checkpoint_path, state_dict, model_assets=[model_config, processor])
+        logger.info_rank0(f"HF checkpoint saved at {hf_checkpoint_path}")
+        
+        s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
+        upload_checkpoint_to_s3(hf_checkpoint_path, s3_upload_path)
+    
+    return checkpoint_path
+
+
 MAX_PIXELS = 128 * 28 * 28
 ROLE_MAPPING = {
     "human": "user",
@@ -120,12 +163,12 @@ def process_sample(
     # Handle different data formats: "text" for fineweb, "conversations" or "messages" for conversation data
     if source_name == "fineweb_100BT":
         conversations = sample["text"]
-    elif "conversations" in sample:
+    elif "conversations" in sample and sample["conversations"]:
         conversations = sample["conversations"]
-    elif "messages" in sample:
+    elif "messages" in sample and sample["messages"]:
         conversations = sample["messages"]
     else:
-        raise KeyError(f"Sample must have one of 'text', 'conversations', or 'messages' keys. Found keys: {list(sample.keys())}")
+        raise KeyError(f"Sample must have one of 'text', 'conversations', or 'messages' keys (with non-None values). Found keys: {list(sample.keys())}")
     
     # Skip preprocessing if source_name is None or empty (data is already in correct format)
     if source_name:
@@ -164,6 +207,16 @@ def process_sample(
 
     tokenized_example["position_ids"] = position_ids.squeeze().clone()  # (dim, l)
     # clone here as text_only data is (1, l).expand(dim, -1),
+
+    # [SEQ_OVERFLOW] Log warning if sequence exceeds max_seq_len
+    seq_len = position_ids.shape[-1]
+    if seq_len > 32768:
+        logger.warning(
+            f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len 32768 "
+            f"(overflow: {seq_len - 32768} tokens, "
+            f"{100 * (seq_len - 32768) / 32768:.1f}%)")
+        if image_grid_thw is not None:
+            logger.warning(f"INPUT [SEQ_OVERFLOW] Sample has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}")
 
     tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
     tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
@@ -260,6 +313,7 @@ def main():
     processor.image_processor.max_pixels = MAX_PIXELS
     position_id_func = model.get_position_id_func()
     chat_template = build_multimodal_chat_template(args.data.chat_template, processor.tokenizer)
+    processor.tokenizer.chat_template = chat_template.chat_template
     transform = partial(
         process_sample,
         processor=processor,
@@ -639,7 +693,6 @@ def main():
 
             if args.train.save_steps and global_step % args.train.save_steps == 0:
                 helper.empty_cache()
-                save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")
                 state = {
                     "model": model,
                     "optimizer": optimizer,
@@ -651,14 +704,9 @@ def main():
                         "torch_rng_state": torch.get_rng_state(),
                     },
                 }
-                Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
-                dist.barrier()
-                logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
-                
-                # Upload to S3 if configured
-                if args.train.checkpoint_upload_path and args.train.global_rank == 0:
-                    s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
-                    upload_checkpoint_to_s3(save_checkpoint_path, s3_upload_path)
+                save_checkpoint_path = save_and_upload_checkpoint(
+                    Checkpointer, args.train.save_checkpoint_path, state, global_step, args, model_config, processor
+                )
 
         data_loader_tqdm.close()
         start_step = 0
@@ -715,7 +763,6 @@ def main():
         
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
-            save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")
             state = {
                 "model": model,
                 "optimizer": optimizer,
@@ -727,9 +774,9 @@ def main():
                     "torch_rng_state": torch.get_rng_state(),
                 },
             }
-            Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
-            dist.barrier()
-            logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+            save_checkpoint_path = save_and_upload_checkpoint(
+                Checkpointer, args.train.save_checkpoint_path, state, global_step, args, model_config, processor
+            )
 
     synchronize()
     # release memory
@@ -746,6 +793,12 @@ def main():
             )
             save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
             logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
+            
+            # Upload final checkpoint to S3 if configured
+            if args.train.checkpoint_upload_path:
+                final_global_step = save_checkpoint_path.split("_")[-1]
+                s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{final_global_step}"
+                upload_checkpoint_to_s3(hf_weights_path, s3_upload_path)
 
     dist.barrier()
     dist.destroy_process_group()

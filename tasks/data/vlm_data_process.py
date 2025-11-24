@@ -209,7 +209,7 @@ def process_sample_qwen3_vl(
         conversations = sample["text"]
     else:
         raise ValueError(f"Sample must have 'messages', 'conversations', or 'text' field. Got keys: {list(sample.keys())}")
-    
+            
     conversations = conv_preprocess(source, conversations, **kwargs) if source else conversations
 
     token_num_inputs, image_inputs, video_inputs = {}, {}, {}

@@ -117,6 +117,7 @@ def build_native_dataloader(
             buffer_size=dyn_bsz_buffer_size,
             bsz_warmup_steps=bsz_warmup_steps if bsz_warmup_steps else -1,
             bsz_warmup_init_mbtoken=bsz_warmup_init_mbtoken,
+            max_seq_len=max_seq_len,
         )
         dyn_bsz_collate_fn = collate_fn
         collate_fn = UnpackDataCollator()

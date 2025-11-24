@@ -156,6 +156,10 @@ chat_template.jinja
 
 # nsys file
 nsysoutput/
+
+# Datasets
+sharegpt4v_cap_100k/
+coco/
 **/*.jpg
 **/veomni_first_batch_dump.txt
 

@@ -1254,6 +1254,19 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
+        # [SEQ_LENGTH_DEBUG] Only log if sequence exceeds max_seq_len  
+        if input_ids is not None and input_ids.shape[-1] > 32768:
+            from veomni.utils import helper
+            logger = helper.create_logger(__name__)
+            logger.warning(
+                f"MODEL [SEQ_OVERFLOW] Model receiving oversized input: {input_ids.shape[-1]} tokens "
+                f"(exceeds max 32768 by {input_ids.shape[-1] - 32768} tokens)"
+            )
+            if image_grid_thw is not None:
+                logger.warning(f"MODEL [SEQ_OVERFLOW] Input has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}")
+            if video_grid_thw is not None:
+                logger.warning(f"MODEL [SEQ_OVERFLOW] Input has {video_grid_thw.shape[0]} videos: {video_grid_thw.tolist()}")
+
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 

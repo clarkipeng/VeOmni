@@ -1,0 +1,13 @@
+================================================================================
+VeOmni First Batch Sequence Dump
+================================================================================
+
+
+--- Micro Batch 0 ---
+
+input_ids shape: torch.Size([1, 32767])
+Decoded (first 500 chars): <|vision_start|>!<|vision_end|>```python
+('0', 'Sketch', ('Feature', 'Top', ([1, 0, 0], [0, 0, -1], [0, 1, 0], [0, 0, 0])), [('Path', (-1.5, -1.5), [('ZP7', 'Line', (1.5, -1.5)), ('Ah3', 'Line', (1.5, 1.5)), ('JS0', 'Line', (-1.5, 1.5), Flipped=True), ('ka0', 'Line', (-1.5, -1.5), Flipped=True)]), ('Path', (-1.1742424, -1.1742424), [('sF0', 'Line', (1.1742424, -1.1742424)), ('Ls7', 'Line', (1.1742424, 1.1742424)), ('ZL8', 'Line', (-1.1742424, 1.1742424), Flipped=True), ('ej1', 'Line', (-1.174242...
+
+Labels: 28119/32767 valid (85.81%), 4648 masked
+Image tokens: 38 found, 38/38 masked in labels

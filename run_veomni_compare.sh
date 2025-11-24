@@ -73,7 +73,7 @@ uv sync --frozen --extra gpu --extra audio
 # uv pip install -e .[gpu,audio]
 
 NNODES=${NNODES:=1}
-NPROC_PER_NODE=${NPROC_PER_NODE:=8}
+NPROC_PER_NODE=${NPROC_PER_NODE:=2}
 NODE_RANK=${NODE_RANK:=0}
 MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
 MASTER_PORT=${MASTER_PORT:=12345}

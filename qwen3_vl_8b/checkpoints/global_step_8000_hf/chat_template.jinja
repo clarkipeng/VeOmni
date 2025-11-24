@@ -1,0 +1,18 @@
+{%- for message in messages %}
+    {%- if message.content is string %}
+        {% generation %}
+            {{- message.content }}
+        {% endgeneration %}
+    {%- else %}
+        {%- for content_item in message.content %}
+            {%- if content_item.type == "text" %}
+                {% generation %}
+                    {{- content_item.text }}
+                {% endgeneration %}
+            {%- elif content_item.type == "image" %}
+                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+{%- endfor %}
+
