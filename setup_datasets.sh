@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+curl -LsSf https://astral.sh/uv/0.9.8/install.sh | sh
+source $HOME/.local/bin/env
+uv sync --extra gpu
+
 # Source .env for AWS credentials
 if [ -f .env ]; then
     echo "Loading environment variables from .env..."
