@@ -160,7 +160,15 @@ nsysoutput/
 # Datasets
 sharegpt4v_cap_100k/
 coco/
-**/*.jpg
+llava/
+sam/
+
+playground/
+sam_images_share-sft/
+share_textvqa/
+web-celebrity/
+web-landmark/
+wikiart/**/*.jpg
 **/veomni_first_batch_dump.txt
 
 # Large datasets

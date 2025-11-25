@@ -36,7 +36,7 @@ train:
   enable_reentrant: false
   use_wandb: true
   wandb_project: "gcd-run-42_vl_pt"
-  wandb_name: "pure_5e-5_vit_1e-6_25-mix"
+  wandb_name: "pure_5e-5_vit_1e-6_25-mix_fixed"
   rmpad: false
   rmpad_with_pos_ids: true
   ulysses_parallel_size: 1
@@ -49,11 +49,11 @@ train:
   ckpt_manager: dcp
   save_hf_weights: false
   allow_cuda_launch_blocking: false
-  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/pure_5e-5_vit_1e-6_25-mix  # S3 path for auto-upload
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/pure_5e-5_vit_1e-6_25-mix_fixed  # S3 path for auto-upload
   # memory ops
   enable_mixed_precision: true
-  optimizer: "anyprecision_adamw"
+  optimizer: "adamw"
   enable_gradient_checkpointing: true  # Reduces memory by trading compute for memory
   # enable_activation_offload: true  # Offload activations to CPU to save GPU memory
   # activation_gpu_limit: 50.0  # GB of activations to keep on GPU (adjust based on available memory)
-  empty_cache_steps: 5  # Clear cache more frequently to reduce fragmentation
+  empty_cache_steps: 500  # Clear cache more frequently to reduce fragmentation

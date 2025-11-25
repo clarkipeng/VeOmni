@@ -59,17 +59,6 @@ def main() -> None:
     
     model.prepare_inputs_for_generation = patched_prepare_inputs
     
-    # Load custom chat template if provided
-    if args.infer.template_path:
-        from pathlib import Path
-        template_path = Path(args.infer.template_path)
-        if not template_path.exists():
-            raise FileNotFoundError(f"Template file not found: {template_path}")
-        with open(template_path, 'r') as f:
-            custom_template = f.read()
-        tokenizer.chat_template = custom_template
-        logger.info(f"Loaded custom chat template from: {args.infer.template_path}")
-    
     logger.info("Tips:")
     logger.info("  - Type '/image <path>' to load an image")
     logger.info("  - Type 'clear' to remove the history")
@@ -139,7 +128,6 @@ def main() -> None:
             "temperature": args.infer.temperature,
             "top_p": args.infer.top_p,
             "max_new_tokens": args.infer.max_tokens,
-            "repetition_penalty": args.infer.repetition_penalty,
             "streamer": streamer,
             "eos_token_id": tokenizer.eos_token_id,
             "pad_token_id": tokenizer.eos_token_id,

@@ -94,13 +94,39 @@ def process_sample_qwen2_5_vl(
 
     token_num_inputs, image_inputs, video_inputs = {}, {}, {}
     image_grid_thw, video_grid_thw = None, None
-    if "images" in sample:
-        images = fetch_images(sample["images"], **kwargs)
-        image_inputs = processor.image_processor(images=images, return_tensors="pt")
-        image_grid_thw = image_inputs["image_grid_thw"]
-        merge_length = processor.image_processor.merge_size**2
-        image_token_num = image_grid_thw.prod(dim=-1) // merge_length
-        token_num_inputs["image"] = image_token_num
+    if "images" in sample or "image" in sample:
+        image_paths = sample.get("images", sample.get("image"))
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        
+        try:
+            images = fetch_images(image_paths, **kwargs)
+            image_inputs = processor.image_processor(images=images, return_tensors="pt")
+            image_grid_thw = image_inputs["image_grid_thw"]
+            merge_length = processor.image_processor.merge_size**2
+            image_token_num = image_grid_thw.prod(dim=-1) // merge_length
+            token_num_inputs["image"] = image_token_num
+        except (FileNotFoundError, Exception) as e:
+            # Skip samples with missing images
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Skipping sample due to missing image: {image_paths}. Error: {e}")
+            return []  # Return empty list to skip this sample
+        
+    # Validation: ensure we have images if the conversation requires them
+    num_image_tokens_in_conv = 0
+    for msg in conversations:
+        for item in msg[1:]:
+            if item[0] == "image":
+                num_image_tokens_in_conv += 1
+                
+    if num_image_tokens_in_conv > 0:
+        if "image" not in token_num_inputs or len(token_num_inputs["image"]) != num_image_tokens_in_conv:
+            raise ValueError(
+                f"Mismatch in image count: Conversation has {num_image_tokens_in_conv} image tokens, "
+                f"but loaded {len(token_num_inputs.get('image', []))} images. "
+                f"Sample keys: {list(sample.keys())}"
+            )
     if "videos" in sample:
         videos, _ = fetch_videos(sample["videos"], **kwargs)
         video_inputs = processor.image_processor(images=None, videos=videos, return_tensors="pt")
@@ -214,13 +240,45 @@ def process_sample_qwen3_vl(
 
     token_num_inputs, image_inputs, video_inputs = {}, {}, {}
     image_grid_thw, video_grid_thw = None, None
+    if "image" in sample and sample['image']:
+        sample['images'] = sample.get('images',[]) + [sample['image']]
     if sample.get("images"):
-        images = fetch_images(sample["images"], **kwargs)
-        image_inputs = processor.image_processor(images=images, return_tensors="pt")
+        image_paths = sample.get("images", [])
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        
+        if sample.get['image']:
+            image_paths.append(sample['image'])
+        
+        try:
+            images = fetch_images(image_paths, **kwargs)
+            image_inputs = processor.image_processor(images=images, return_tensors="pt")
+        except (FileNotFoundError, Exception) as e:
+            # Skip samples with missing images
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Skipping sample due to missing image: {image_paths}. Error: {e}")
+            return []  # Return empty list to skip this sample
         image_grid_thw = image_inputs["image_grid_thw"]
         merge_length = processor.image_processor.merge_size**2
         image_token_num = image_grid_thw.prod(dim=-1) // merge_length
         token_num_inputs["image"] = image_token_num
+        
+    # Validation: ensure we have images if the conversation requires them
+    num_image_tokens_in_conv = 0
+    for msg in conversations:
+        # msg is (role, (type, value), ...)
+        for item in msg[1:]:
+            if item[0] == "image":
+                num_image_tokens_in_conv += 1
+                
+    if num_image_tokens_in_conv > 0:
+        if "image" not in token_num_inputs or len(token_num_inputs["image"]) != num_image_tokens_in_conv:
+            raise ValueError(
+                f"Mismatch in image count: Conversation has {num_image_tokens_in_conv} image tokens, "
+                f"but loaded {len(token_num_inputs.get('image', []))} images. "
+                f"Sample keys: {list(sample.keys())}"
+            )
     if "videos" in sample:
         videos, _ = fetch_videos(sample["videos"], **kwargs)
         video_inputs = processor.video_processor(images=None, videos=videos, return_tensors="pt")
