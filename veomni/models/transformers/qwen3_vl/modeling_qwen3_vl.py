@@ -347,9 +347,22 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         # In contrast to other models, Qwen3VL has different position ids for the grids
-        # So we expand the inv_freq to shape (3, ...)
-        if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # position_ids should always be 3D: (3, bs, seq_len) for T, H, W dimensions
+        # If it's 2D, we need to determine if it's (bs, seq_len) or (3, seq_len)
+        # If it's 3D but wrong shape (1, 3, seq_len), transpose it to (3, 1, seq_len)
+        if position_ids.ndim == 3:
+            if position_ids.shape[0] == 1 and position_ids.shape[1] == 3:
+                # position_ids is (1, 3, seq_len) - wrong order, transpose to (3, 1, seq_len)
+                position_ids = position_ids.transpose(0, 1)
+        elif position_ids.ndim == 2:
+            if position_ids.shape[0] == 3:
+                # position_ids is (3, seq_len) - already 3D format but batch dimension squeezed (bs=1)
+                # Add batch dimension: (3, seq_len) -> (3, 1, seq_len)
+                position_ids = position_ids.unsqueeze(1)
+            else:
+                # position_ids is (bs, seq_len) - standard 2D, expand to (3, bs, seq_len)
+                position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # Now position_ids is always (3, bs, seq_len)
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
 
@@ -470,6 +483,16 @@ class Qwen3VLTextAttention(nn.Module):
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        # Debug: Print shapes before attention
+        if query_states.shape[0] != value_states.shape[0] or query_states.shape[0] != key_states.shape[0]:
+            print(
+                f"[DEBUG] Shape mismatch before attention: query={query_states.shape}, key={key_states.shape}, value={value_states.shape}"
+            )
+            print(
+                f"[DEBUG] cos.shape={cos.shape if cos is not None else None}, sin.shape={sin.shape if sin is not None else None}"
+            )
+            print(f"[DEBUG] input_shape={input_shape}, hidden_shape={hidden_shape}")
 
         # FA kwargs should be included in kwargs implicitly
         attn_output, attn_weights = attention_interface(
@@ -896,10 +919,30 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             )
 
         # the hard coded `3` is for temporal, height and width.
+        # position_ids should always be 3D: (3, bs, seq_len) for T, H, W dimensions
         if position_ids is None:
+            # cache_position shape: (seq_len,)
+            # Expand to (3, bs, seq_len) for T, H, W dimensions
             position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+        elif position_ids.ndim == 3:
+            # position_ids is 3D - check if it's (1, 3, seq_len) and transpose to (3, 1, seq_len)
+            if position_ids.shape[0] == 1 and position_ids.shape[1] == 3:
+                position_ids = position_ids.transpose(0, 1)
+            elif position_ids.shape[0] != 3:
+                raise ValueError(f"position_ids 3D tensor must have first dim=3, got shape {position_ids.shape}")
         elif position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+            # position_ids is 2D - need to determine if it's (bs, seq_len) or (3, seq_len)
+            if position_ids.shape[0] == 3:
+                # position_ids is (3, seq_len) - already 3D format but batch dimension squeezed (bs=1)
+                # Add batch dimension: (3, seq_len) -> (3, 1, seq_len)
+                position_ids = position_ids.unsqueeze(1)
+            else:
+                # position_ids is (bs, seq_len) - standard 2D, expand to (3, bs, seq_len)
+                position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # Now position_ids is always (3, bs, seq_len) - ensure batch dimension exists
+        assert position_ids.ndim == 3 and position_ids.shape[0] == 3, (
+            f"position_ids must be 3D with shape (3, bs, seq_len), but got shape {position_ids.shape}"
+        )
 
         if position_ids.ndim == 3 and position_ids.shape[0] == 4:
             text_position_ids = position_ids[0]
@@ -1214,6 +1257,24 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        # [SEQ_LENGTH_DEBUG] Only log if sequence exceeds max_seq_len
+        if input_ids is not None and input_ids.shape[-1] > 32768:
+            from veomni.utils import helper
+
+            logger = helper.create_logger(__name__)
+            logger.warning(
+                f"MODEL [SEQ_OVERFLOW] Model receiving oversized input: {input_ids.shape[-1]} tokens "
+                f"(exceeds max 32768 by {input_ids.shape[-1] - 32768} tokens)"
+            )
+            if image_grid_thw is not None:
+                logger.warning(
+                    f"MODEL [SEQ_OVERFLOW] Input has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}"
+                )
+            if video_grid_thw is not None:
+                logger.warning(
+                    f"MODEL [SEQ_OVERFLOW] Input has {video_grid_thw.shape[0]} videos: {video_grid_thw.tolist()}"
+                )
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)

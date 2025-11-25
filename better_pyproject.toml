@@ -52,8 +52,8 @@ dit = [
 ]
 gpu =[
   "torch==2.8.0+cu128",
-  "torchvision==0.23.0+cu128", # <--- Pin this explicitly (verify version number)
-  "torchaudio==2.8.0+cu128",   # <--- Good practice to pin this too
+  "torchvision",
+  "torchaudio",
   "liger-kernel",
     "torchtitan",
     "modal>=1.2.0",
@@ -104,9 +104,13 @@ test = [
 required-version = "==0.9.8"
 # This section is used to force version when two packages have non-overlapping dependencies.
 override-dependencies = [
+    # Adding the (extra == 'gpu') mark to declare this override is only for gpu extra.
+    # Without this mark, uv would download torch/torchaudio/torchvision unexpectedly from
+    # byted pypi without using the cu126 versions.
+    # Ref: https://github.com/astral-sh/uv/issues/11153
     "torch==2.8.0+cu128; (extra == 'gpu')",
-    "torchaudio==2.8.0+cu128; (extra == 'gpu')",
-    "torchvision==0.23.0+cu128; (extra == 'gpu')", # <--- Add version here
+    "torchaudio; (extra == 'gpu')",
+    "torchvision; (extra == 'gpu')",
     # Adding explicit override for other backends as well. Otherwise these libraries
     # will be excluded for other backends.
     "torch==2.6.0+cpu; (extra == 'npu') and python_version < '3.13'",

@@ -1,0 +1,8 @@
+
+names:
+  - sharegpt4v_captioner_sft
+sources:
+  - sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json
+schedule:
+  - schedule_type: const
+    weights: [1.0]

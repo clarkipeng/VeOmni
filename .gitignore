@@ -154,3 +154,16 @@ processor_config.json
 
 # nsys file
 nsysoutput/
+
+
+sharegpt4v_cap_100k/
+coco/
+llava/
+sam/
+
+playground/
+sam_images_share-sft/
+share_textvqa/
+web-celebrity/
+web-landmark/
+wikiart/

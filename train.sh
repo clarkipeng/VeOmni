@@ -17,7 +17,7 @@ else
   additional_args="--rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT}"
 fi
 
-torchrun \
+uv run torchrun \
   --nnodes=$NNODES \
   --nproc-per-node=$NPROC_PER_NODE \
   --node-rank=$NODE_RANK \

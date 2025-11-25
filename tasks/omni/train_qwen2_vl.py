@@ -23,7 +23,7 @@ from veomni.data import (
     build_mapping_dataset,
     build_multimodal_chat_template,
 )
-from veomni.data.constants import IMAGE_INPUT_INDEX
+from veomni.data.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
 from veomni.data.multimodal.preprocess import conv_preprocess
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 
     from veomni.data.chat_template import ChatTemplate
 
+
+# Disable torch.compile to avoid Muon optimizer recompilation issues
+torch._dynamo.config.suppress_errors = True
 
 logger = helper.create_logger(__name__)
 
@@ -73,10 +76,19 @@ def process_sample(
 
     token_num_inputs, image_inputs = {}, {}
     image_grid_thw = None
+    if "image" in sample and sample['image']:
+        sample['images'] = sample.get('images',[]) + [sample['image']]
     if "images" in sample and sample["images"]:
         images = []
         for image in sample["images"]:
-            images.append(Image.open(BytesIO(image)).convert("RGB"))
+            try:
+                images.append(Image.open(BytesIO(image)).convert("RGB"))
+            except:
+                try:
+                    images.append(Image.open(image).convert("RGB"))
+                except Exception as e:
+                    print(f"{sample["source_name"]} skipped, {e}")
+                    return []
 
         image_inputs = processor.image_processor(images=images, return_tensors="pt")
         image_grid_thw = image_inputs["image_grid_thw"]
@@ -98,7 +110,14 @@ def process_sample(
     # clone here as text_only data is (1, l).expand(dim, -1),
 
     tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
+    tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
     tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
+    tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
+
+    # Convert pixel_values to bfloat16 if present (for mixed precision training)
+    if "pixel_values" in image_inputs:
+        image_inputs["pixel_values"] = image_inputs["pixel_values"].to(torch.bfloat16)
+
     tokenized_example.update(image_inputs)
     return [tokenized_example]
 
@@ -162,9 +181,11 @@ def main():
     )
 
     logger.info_rank0("Prepare model")
+
     model = build_foundation_model(
         config_path=args.model.config_path,
         weights_path=args.model.model_path,
+        attn_implementation=args.model.attn_implementation,
         torch_dtype="float32" if args.train.enable_mixed_precision else "bfloat16",
         init_device=args.train.init_device,
         force_use_huggingface=args.model.force_use_huggingface,
@@ -416,11 +437,11 @@ def main():
                     )
                     wandb.log(train_metrics, step=global_step)
 
-            if args.train.profile_this_rank and global_step <= args.train.profile_end_step:
-                profiler.step()
-                if global_step == args.train.profile_end_step:
-                    profiler.stop()
-                    helper.upload_trace(args.train.wandb_project, args.train.wandb_name, args.train.profile_trace_dir)
+            # if args.train.profile_this_rank and global_step <= args.train.profile_end_step:
+            #     profiler.step()
+            #     if global_step == args.train.profile_end_step:
+            #         profiler.stop()
+                    # helper.upload_trace(args.train.wandb_project, args.train.wandb_name, args.train.profile_trace_dir)
 
             if args.train.save_steps and global_step % args.train.save_steps == 0:
                 helper.empty_cache()
