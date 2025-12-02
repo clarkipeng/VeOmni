@@ -168,8 +168,10 @@ sam_images_share-sft/
 share_textvqa/
 web-celebrity/
 web-landmark/
-wikiart/**/*.jpg
+wikiart/
+
 **/veomni_first_batch_dump.txt
+**/*.jpg
 
 # Large datasets
 sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json

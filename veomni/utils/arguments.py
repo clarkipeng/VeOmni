@@ -188,6 +188,10 @@ class DataArguments:
         default="default",
         metadata={"help": "Chat template to use."},
     )
+    template_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the jinja template file."},
+    )
     max_seq_len: int = field(
         default=2048,
         metadata={"help": "Maximum sequence length in training."},
@@ -756,6 +760,10 @@ class InferArguments:
     max_tokens: int = field(
         default=1024,
         metadata={"help": "Max tokens to generate."},
+    )
+    template_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the jinja template file."},
     )
 
     def __post_init__(self):

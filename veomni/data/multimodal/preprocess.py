@@ -373,8 +373,8 @@ def messages_format_preprocess(conversations, **kwargs):
         role = msg.get("role", "").lower()
         content = msg.get("content", "")
         
-        # Skip if role is not user or assistant
-        if role not in ["user", "assistant"]:
+        # Skip if role is not user or assistant or system or tool
+        if role not in ["user", "assistant", "system", "tool"]:
             continue
         
         # Handle content - can be string or list of content items
@@ -403,6 +403,62 @@ def messages_format_preprocess(conversations, **kwargs):
         else:
             # Fallback: treat as text
             constructed_conversation.append([role, ("text", str(content))])
+    
+    return constructed_conversation
+
+
+def nemotron_preprocess(conversations, **kwargs):
+    """
+    Preprocess Nemotron conversations, removing <think> tags.
+    """
+    constructed_conversation = []
+    for msg in conversations:
+        role = msg.get("role", "").lower()
+        content = msg.get("content", "")
+        
+        # Skip if role is not user or assistant or system or tool
+        if role not in ["user", "assistant", "system", "tool"]:
+            continue
+        
+        # Helper to clean text
+        def clean_text(text):
+            return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+        # Handle content - can be string or list of content items
+        if isinstance(content, str):
+            # Simple text content
+            cleaned_content = clean_text(content)
+            if cleaned_content:
+                constructed_conversation.append([role, ("text", cleaned_content)])
+        elif isinstance(content, list):
+            # Content is a list of items (e.g., [{"type": "text", "text": "..."}, {"type": "image"}])
+            content_items = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type", "text")
+                    if item_type == "text":
+                        text = item.get("text", "")
+                        cleaned_text = clean_text(text)
+                        if cleaned_text:
+                            content_items.append(("text", cleaned_text))
+                    elif item_type == "image":
+                        content_items.append(("image", None))
+                    elif item_type == "video":
+                        content_items.append(("video", None))
+                    elif item_type == "audio":
+                        content_items.append(("audio", None))
+                elif isinstance(item, str):
+                    # Fallback: treat string as text
+                    cleaned_text = clean_text(item)
+                    if cleaned_text:
+                        content_items.append(("text", cleaned_text))
+            if content_items:
+                constructed_conversation.append([role] + content_items)
+        else:
+            # Fallback: treat as text
+            cleaned_content = clean_text(str(content))
+            if cleaned_content:
+                constructed_conversation.append([role, ("text", cleaned_content)])
     
     return constructed_conversation
 
@@ -441,7 +497,10 @@ DATASETS = {
     "qa-freeform-vlm": messages_format_preprocess,
     "qa-verify-yes-vlm": messages_format_preprocess,
     "qa-verify-no-vlm": messages_format_preprocess,
+    "sft-vlm": messages_format_preprocess,
+    "sft-all-vlm": messages_format_preprocess,
     "cad-document-max-vlm": messages_format_preprocess,
+    "nemotron-sft": nemotron_preprocess,
 }
 
 

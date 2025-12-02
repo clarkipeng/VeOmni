@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import sys
@@ -134,6 +135,14 @@ def save_and_upload_checkpoint(
         hf_checkpoint_path = f"{checkpoint_path}_hf"
         state_dict = dcp_to_torch_state_dict(save_checkpoint_path=checkpoint_path)
         save_model_weights(hf_checkpoint_path, state_dict, model_assets=[model_config, processor])
+        
+        # Explicitly save chat template to ensure it's correct
+        if hasattr(processor.tokenizer, "chat_template") and processor.tokenizer.chat_template:
+            template_file = os.path.join(hf_checkpoint_path, "chat_template.jinja")
+            with open(template_file, "w") as f:
+                f.write(processor.tokenizer.chat_template)
+            logger.info_rank0(f"Explicitly saved chat template to {template_file}")
+
         logger.info_rank0(f"HF checkpoint saved at {hf_checkpoint_path}")
         
         s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
@@ -154,6 +163,7 @@ def process_sample(
     processor: "ProcessorMixin",
     chat_template: "ChatTemplate",
     position_id_func: "Callable",
+    max_seq_len: int = 32768,
     **kwargs,
 ):
     """
@@ -210,13 +220,19 @@ def process_sample(
 
     # [SEQ_OVERFLOW] Log warning if sequence exceeds max_seq_len
     seq_len = position_ids.shape[-1]
-    if seq_len > 32768:
+    if seq_len > max_seq_len:
         logger.warning(
-            f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len 32768 "
-            f"(overflow: {seq_len - 32768} tokens, "
-            f"{100 * (seq_len - 32768) / 32768:.1f}%)")
-        if image_grid_thw is not None:
-            logger.warning(f"INPUT [SEQ_OVERFLOW] Sample has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}")
+            f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len {max_seq_len} "
+            f"(overflow: {seq_len - max_seq_len} tokens, "
+            f"{100 * (seq_len - max_seq_len) / max_seq_len:.1f}%) - DROPPING SAMPLE")
+        return []
+    # if seq_len > 32768:
+    #     logger.warning(
+    #         f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len 32768 "
+    #         f"(overflow: {seq_len - 32768} tokens, "
+    #         f"{100 * (seq_len - 32768) / 32768:.1f}%)")
+    #     if image_grid_thw is not None:
+    #         logger.warning(f"INPUT [SEQ_OVERFLOW] Sample has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}")
 
     tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
     tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
@@ -312,13 +328,21 @@ def main():
     processor = build_processor(args.model.tokenizer_path)
     processor.image_processor.max_pixels = MAX_PIXELS
     position_id_func = model.get_position_id_func()
-    chat_template = build_multimodal_chat_template(args.data.chat_template, processor.tokenizer)
+    chat_template = build_multimodal_chat_template(
+        args.data.chat_template, 
+        processor.tokenizer, 
+        template_path=args.data.template_path
+    )
     processor.tokenizer.chat_template = chat_template.chat_template
+    if hasattr(processor.tokenizer, "init_kwargs"):
+        processor.tokenizer.init_kwargs["chat_template"] = chat_template.chat_template
+    print("SET CHAT TEMPLATE", chat_template.chat_template)
     transform = partial(
         process_sample,
         processor=processor,
         chat_template=chat_template,
         position_id_func=position_id_func,
+        max_seq_len=args.data.max_seq_len,
     )
 
     if args.train.rmpad:
@@ -427,6 +451,7 @@ def main():
 
     model = build_parallelize_model(
         model,
+        weights_path=args.model.model_path,
         enable_full_shard=args.train.enable_full_shard,
         enable_mixed_precision=args.train.enable_mixed_precision,
         enable_gradient_checkpointing=args.train.enable_gradient_checkpointing,
@@ -512,6 +537,11 @@ def main():
     model_fwd_context, model_bwd_context = build_activation_offloading_context(
         args.train.enable_activation_offload, args.train.enable_gradient_checkpointing, args.train.activation_gpu_limit
     )
+
+    if args.train.enable_compile:
+        logger.info_rank0("Compiling model with torch.compile...")
+        model = torch.compile(model)
+
     model.train()
     logger.info(
         f"rank{args.train.local_rank} Start training, train_steps: {args.train.train_steps}, epochs: {args.train.num_train_epochs}"
@@ -540,7 +570,7 @@ def main():
                 helper.print_example(example=micro_batches[0], rank=args.train.local_rank)
                 
                 # Dump first batch to file for debugging
-                dump_file = Path(args.train.output_dir) / "veomni_first_batch_dump.txt"
+                dump_file = Path(args.train.output_dir) / "log.txt"
                 dump_file.parent.mkdir(parents=True, exist_ok=True)
                 tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
                 
@@ -557,10 +587,20 @@ def main():
                         if input_ids is not None:
                             f.write(f"input_ids shape: {input_ids.shape}\n")
                             try:
-                                decoded = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-                                f.write(f"Decoded (first 500 chars): {decoded[:500]}...\n\n")
+                                # Handle negative IDs for decoding
+                                clean_input_ids = []
+                                for tid in input_ids[0].tolist():
+                                    if tid < 0:
+                                        clean_input_ids.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                                    else:
+                                        clean_input_ids.append(tid)
+                                
+                                decoded = tokenizer.decode(clean_input_ids, skip_special_tokens=False)
+                                f.write(f"Decoded : {decoded}...\n\n")
+                                logger.info_rank0(f"Decoded Input (MB {mb_idx}):\n{decoded}...")
                             except Exception as e:
                                 f.write(f"Could not decode: {e}\n\n")
+                                logger.warning(f"Could not decode input: {e}")
                         
                         if labels is not None:
                             num_valid = (labels != -100).sum().item()
@@ -568,6 +608,22 @@ def main():
                             num_masked = (labels == -100).sum().item()
                             f.write(f"Labels: {num_valid}/{num_total} valid ({100*num_valid/num_total:.2f}%), {num_masked} masked\n")
                             
+                            # Decode targets (valid labels only)
+                            try:
+                                clean_labels = []
+                                for tid in labels[0].tolist():
+                                    if tid == -100:
+                                        continue # Skip ignored
+                                    if tid < 0:
+                                        clean_labels.append(tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
+                                    else:
+                                        clean_labels.append(tid)
+                                decoded_labels = tokenizer.decode(clean_labels, skip_special_tokens=False)
+                                f.write(f"Decoded Targets (first 1000 chars): {decoded_labels[:1000]}...\n\n")
+                                logger.info_rank0(f"Decoded Targets (MB {mb_idx}):\n{decoded_labels[:1000]}...")
+                            except Exception as e:
+                                f.write(f"Could not decode labels: {e}\n\n")
+
                             # Check if image tokens are properly masked
                             if input_ids is not None:
                                 image_mask = (input_ids == IMAGE_INPUT_INDEX) | (input_ids == 0)
@@ -792,6 +848,16 @@ def main():
                 ckpt_manager=args.train.ckpt_manager,
             )
             save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
+            
+            # Explicitly save chat template to ensure it's correct
+            # Note: model_assets[1] is processor
+            proc = model_assets[1]
+            if hasattr(proc.tokenizer, "chat_template") and proc.tokenizer.chat_template:
+                template_file = os.path.join(hf_weights_path, "chat_template.jinja")
+                with open(template_file, "w") as f:
+                    f.write(proc.tokenizer.chat_template)
+                logger.info_rank0(f"Explicitly saved chat template to {template_file}")
+
             logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
             
             # Upload final checkpoint to S3 if configured

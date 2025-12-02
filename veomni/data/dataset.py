@@ -19,10 +19,12 @@ from typing import Callable, Dict, List, Literal, Optional
 
 import torch
 from datasets import IterableDataset as HFIterableDataset
-from datasets import interleave_datasets, load_dataset
+from datasets import Features, Sequence, Value, interleave_datasets, load_dataset
 from datasets.distributed import split_dataset_by_node
 from huggingface_hub import hf_hub_download
 from torch.utils.data import Dataset, IterableDataset
+import dotenv
+dotenv.load_dotenv()
 
 from ..utils.registry import Registry
 
@@ -278,7 +280,28 @@ def build_mapping_dataset(
         elif os.path.isfile(data_path):
             data_files.append(data_path)
         else:
-            raise FileNotFoundError(f"Dataset {data_path} not exists.")
+            # Try loading as HuggingFace dataset
+            try:
+                logger.info_rank0(f"Trying to load {data_path} as HuggingFace dataset")
+                with main_process_first():
+                    # Explicitly pass token from env
+                    token = os.environ.get("HUGGING_FACE_TOKEN")
+                    dataset = load_dataset(data_path, split="chat", token=token)
+                    def align_features(example):
+                        new_messages = []
+                        for msg in example["messages"]:
+                            content_str = msg["content"]
+                            new_content = [{"type": "text", "text": content_str, "url": ""}]
+                            new_messages.append({"role": msg["role"], "content": new_content})
+                        return {"messages": new_messages}
+                    # Filter out examples with empty content
+                    # dataset = dataset.filter(lambda x: all(msg["content"] for msg in x["messages"]))
+                    dataset = dataset.map(align_features)
+                if transform:
+                    transform = partial(transform, source_name=source_name)
+                return MappingDataset(data=dataset, transform=transform)
+            except Exception as e:
+                raise FileNotFoundError(f"Dataset {data_path} not exists and failed to load as HF dataset: {e}")
     file_extenstion = os.path.splitext(data_files[0])[-1][1:]
     if file_extenstion not in ["parquet", "jsonl", "json", "csv", "arrow"]:
         raise ValueError(f"{file_extenstion} files are not supported.")
@@ -338,7 +361,32 @@ def build_iterable_dataset(
         elif os.path.isfile(data_path):
             data_files.append(data_path)
         else:
-            raise FileNotFoundError(f"Dataset {data_path} not exists.")
+            # Try loading as HuggingFace dataset
+            try:
+                logger.info_rank0(f"Trying to load {data_path} as HuggingFace dataset")
+                actual_split = namespace
+                actual_split = "chat"
+                # Explicitly pass token from env
+                token = os.environ.get("HUGGING_FACE_TOKEN")
+                dataset = load_dataset(data_path, split=actual_split, streaming=True, token=token)
+                def align_features(example):
+                    new_messages = []
+                    for msg in example["messages"]:
+                        content_str = msg["content"]
+                        new_content = [{"type": "text", "text": content_str, "url": ""}]
+                        new_messages.append({"role": msg["role"], "content": new_content})
+                    return {"messages": new_messages}
+                
+                # Filter out examples with empty content
+                # dataset = dataset.filter(lambda x: all(msg["content"] for msg in x["messages"]))
+                dataset = dataset.map(align_features)
+                dataset = dataset.shuffle(seed=seed, buffer_size=10_000)
+                dataset = split_dataset_by_node(dataset, parallel_state.dp_rank, parallel_state.dp_size)
+                if transform:
+                    transform = partial(transform, source_name=source_name)
+                return IterativeDataset(dataset, transform=transform)
+            except Exception as e:
+                raise FileNotFoundError(f"Dataset {data_path} not exists and failed to load as HF dataset: {e}")
 
     parallel_state = get_parallel_state()
     file_extenstion = os.path.splitext(data_files[0])[-1][1:]

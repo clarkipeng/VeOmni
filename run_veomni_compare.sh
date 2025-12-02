@@ -3,7 +3,7 @@ set -x
 
 export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 # --- FIX 1: Correct Library Path Precedence ---
 # We build the path string first, then export it once.
@@ -49,7 +49,10 @@ if [ -n "$ENV_FILE" ]; then
     set -a
     source "$ENV_FILE"
     set +a
-    # Explicit exports as before...
+    export AWS_ACCESS_KEY_ID
+    export AWS_SECRET_ACCESS_KEY
+    export AWS_REGION
+    export AWS_DEFAULT_REGION
 else
     echo "Warning: No .env file found."
 fi
@@ -73,7 +76,7 @@ uv sync --frozen --extra gpu --extra audio
 # uv pip install -e .[gpu,audio]
 
 NNODES=${NNODES:=1}
-NPROC_PER_NODE=${NPROC_PER_NODE:=2}
+NPROC_PER_NODE=${NPROC_PER_NODE:=8}
 NODE_RANK=${NODE_RANK:=0}
 MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
 MASTER_PORT=${MASTER_PORT:=12345}
@@ -85,12 +88,21 @@ else
   additional_args="--rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT}"
 fi
 
-# Use the python explicitly from the currently active VIRTUAL_ENV
+# # Use the python explicitly from the currently active VIRTUAL_ENV
+# uv run torchrun \
+#   --nnodes=$NNODES \
+#   --nproc-per-node=$NPROC_PER_NODE \
+#   --node-rank=$NODE_RANK \
+#   $additional_args \
+#   tasks/omni/train_qwen2_vl.py \
+#   configs/multimodal/qwen3_vl/qwen3_vl_8b.yaml \
+#   2>&1 | tee veomni_compare.log
+# # Use the python explicitly from the currently active VIRTUAL_ENV
 uv run torchrun \
   --nnodes=$NNODES \
   --nproc-per-node=$NPROC_PER_NODE \
   --node-rank=$NODE_RANK \
   $additional_args \
   tasks/omni/train_qwen2_vl.py \
-  configs/multimodal/qwen3_vl/qwen3_vl_8b.yaml \
+  configs/multimodal/qwen3_vl/qwen3_vl_8b_sft.yaml \
   2>&1 | tee veomni_compare.log

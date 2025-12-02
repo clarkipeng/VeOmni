@@ -3,15 +3,14 @@ model:
   attn_implementation: flash_attention_2
 
 data:
-  train_path: configs/multimodal/data/multisource_pretrain.yaml
-  val_path: configs/multimodal/data/multisource_pretrain_val.yaml  # Validation dataset
+  train_path: configs/multimodal/data/multisource_sft.yaml
   enable_multisource: true
   datasets_type: mapping
   dataloader_type: native # or streaming
   num_workers: 8
   data_type: conversation
   chat_template: qwen_plan_vl
-  template_path: templates/qwen-plan-vl-pretrain.jinja
+  template_path: templates/qwen-plan-vl-sft.jinja
   max_seq_len: 32768
   train_size: -1
   mm_configs:
@@ -28,29 +27,29 @@ train:
 
   freeze_vit: true
   # vit_lr: 1.0e-6
-  lr: 5.0e-5
-  lr_warmup_ratio: 0.05
+  lr: 1e-5
+  lr_warmup_ratio: 0.007
   lr_decay_style: cosine
   weight_decay: 0.1
-  output_dir: "0.25_5e-5_vitfreeze_25-mix_full"
+  output_dir: "8b_1e-5_deepfry_80split_fixtool"
   data_parallel_mode: fsdp2
   enable_reentrant: false
   use_wandb: true
-  wandb_project: "gcd-run-42_vl_pt"
-  wandb_name: "0.25_5e-5_vitfreeze_25-mix_full"
+  wandb_project: "gcd-run-42_vl_sft"
+  wandb_name: "8b_1e-5_deepfry_80split_fixtool"
   rmpad: false
   rmpad_with_pos_ids: true
   ulysses_parallel_size: 1
   num_train_epochs: 1
   micro_batch_size: 1
   global_batch_size: 8
-  max_steps: 50000
-  save_steps: 5000
+  # max_steps: null #30000 # 6B tokens?
+  # save_steps: 5000
   init_device: meta
   ckpt_manager: dcp
   save_hf_weights: false
   allow_cuda_launch_blocking: false
-  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/0.25_5e-5_vitfreeze_25-mix_full  # S3 path for auto-upload
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/8b_1e-5_deepfry_80split_fixtool # S3 path for auto-upload
   # memory ops
   enable_mixed_precision: true
   optimizer: "adamw"

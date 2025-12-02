@@ -19,6 +19,8 @@ fi
 
 echo "Setting up datasets..."
 
+wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json -P sharegpt4v_cap_100k/
+
 # 1. COCO
 if [ ! -d "coco/train2017" ]; then
     echo "Processing COCO..."
