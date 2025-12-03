@@ -1,0 +1,58 @@
+model:
+  model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+  moe_implementation: fused
+  attn_implementation: flash_attention_2
+
+data:
+  train_path: configs/multimodal/data/multisource_sft.yaml
+  enable_multisource: true
+  datasets_type: mapping
+  dataloader_type: native # or streaming
+  num_workers: 8
+  data_type: conversation
+  chat_template: qwen_plan_vl
+  template_path: templates/qwen-plan-vl-sft.jinja
+  max_seq_len: 32768
+  train_size: -1
+  mm_configs:
+    source: null  # Will handle "messages" format automatically
+    image_bucket: grabcad  # S3 bucket for images
+
+train:
+  enable_compile: false
+  enable_profiling: false
+
+  freeze_vit: true
+
+  output_dir: qwen3_vl_moe_sft
+  data_parallel_mode: fsdp2
+  enable_reentrant: false
+  use_wandb: true
+  wandb_project: gcd-run-42_vl_sft
+  wandb_name: qwen3_vl_moe_wd1e-2
+  rmpad: false
+  rmpad_with_pos_ids: true
+  expert_parallel_size: 1
+  lr: 1.0e-5
+  lr_warmup_ratio: 0.007
+  lr_decay_style: cosine
+  weight_decay: 0.01
+
+  num_train_epochs: 1
+  micro_batch_size: 1
+  global_batch_size: 8
+  # max_steps: -1
+  init_device: meta
+  # enable_profiling: true
+  # profile_start_step: 20
+  # profile_end_step: 21
+  # profile_record_shapes: true
+  ckpt_manager: dcp
+  save_hf_weights: false
+
+  allow_cuda_launch_blocking: false
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/qwen3_vl_moe_wd1e-2 # S3 path for auto-upload
+  enable_mixed_precision: true
+  optimizer: "adamw"
+  enable_gradient_checkpointing: true
+  empty_cache_steps: 500

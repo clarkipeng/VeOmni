@@ -22,7 +22,12 @@ import torch
 from ...utils.import_utils import is_video_audio_available
 from ..constants import TYPE2INDEX
 from .image_utils import fetch_images
-from .preprocess import conv_preprocess
+from .preprocess import (
+    DATASETS,
+    conv_preprocess,
+    messages_format_preprocess,
+    process_mm_data,
+)
 
 
 if is_video_audio_available():
@@ -211,7 +216,16 @@ def encode_multimodal_sample(
     processor_input = {}
 
     if "image" in modality:
-        images = fetch_images(sample.get("images", []), **kwargs)
+        do_random_crop = kwargs.get("do_random_crop", False)
+        if source and source in DATASETS and DATASETS[source] == messages_format_preprocess:
+            do_random_crop = True
+        images = fetch_images(
+            sample.get("images", []),
+            do_random_crop=do_random_crop,
+            crop_ratio=kwargs.get("crop_ratio", 0.6),
+            resize_ratio=kwargs.get("resize_ratio", 0.3333333),
+            **kwargs
+        )
     else:
         images = []
     if "video" in modality:

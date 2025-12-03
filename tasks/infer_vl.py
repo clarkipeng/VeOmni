@@ -89,6 +89,48 @@ def main() -> None:
 
     messages = []
     current_images = []
+
+    if args.infer.prompt_file:
+        with open(args.infer.prompt_file, "r") as f:
+            loaded_messages = json.load(f)
+            # Validate and add to messages
+            for msg in loaded_messages:
+                messages.append(msg)
+            print(f"Loaded {len(messages)} messages from {args.infer.prompt_file}")
+            
+            # If the last message is from user, generate a response immediately
+            if messages and messages[-1]["role"] == "user":
+                print("Last message is from user, generating response...")
+                
+                # Prepare text for generation
+                text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                print("FORMATTED TEXT:", text)
+                
+                inputs = processor(
+                    text=[text],
+                    return_tensors="pt",
+                    padding=True,
+                )
+                
+                inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+                
+                gen_kwargs = {
+                    "do_sample": args.infer.do_sample,
+                    "temperature": args.infer.temperature,
+                    "top_p": args.infer.top_p,
+                    "max_new_tokens": args.infer.max_tokens,
+                    "streamer": streamer,
+                    "eos_token_id": tokenizer.eos_token_id,
+                    "pad_token_id": tokenizer.eos_token_id,
+                }
+                
+                print("Assistant: ", end="", flush=True)
+                with torch.no_grad():
+                    generated_tokens = model.generate(**inputs, **gen_kwargs)
+                
+                response = tokenizer.decode(generated_tokens[0, len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                messages.append({"role": "assistant", "content": response})
+                print("\n")
     
     while True:
         query = input("\nUser: ")

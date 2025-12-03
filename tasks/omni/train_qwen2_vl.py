@@ -538,9 +538,9 @@ def main():
         args.train.enable_activation_offload, args.train.enable_gradient_checkpointing, args.train.activation_gpu_limit
     )
 
-    if args.train.enable_compile:
-        logger.info_rank0("Compiling model with torch.compile...")
-        model = torch.compile(model)
+    # if args.train.enable_compile:
+    #     logger.info_rank0("Compiling model with torch.compile...")
+    #     model = torch.compile(model)
 
     model.train()
     logger.info(

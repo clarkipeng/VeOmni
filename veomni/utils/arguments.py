@@ -228,6 +228,18 @@ class DataArguments:
         default=False,
         metadata={"help": "Whether to ignore exceptions using byted dataset. Defaults to ``False``"},
     )
+    do_random_crop: bool = field(
+        default=False,
+        metadata={"help": "Whether to apply random crop and resize augmentation."},
+    )
+    crop_ratio: float = field(
+        default=0.6,
+        metadata={"help": "Ratio of image to keep during random crop (0.0-1.0). Default 0.6."},
+    )
+    resize_ratio: float = field(
+        default=0.3333333,
+        metadata={"help": "Minimum scale factor for random resize. Max scale will be 2 - resize_ratio. Default 0.5 (range 0.5-1.5)."},
+    )
 
     def __post_init__(self):
         self.enable_multisource = self.train_path.endswith(".yaml")
@@ -764,6 +776,10 @@ class InferArguments:
     template_path: Optional[str] = field(
         default=None,
         metadata={"help": "Path to the jinja template file."},
+    )
+    prompt_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a JSON file containing initial messages"},
     )
 
     def __post_init__(self):

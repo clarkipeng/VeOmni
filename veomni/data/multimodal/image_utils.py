@@ -1,4 +1,5 @@
 import io
+import random
 import math
 from io import BytesIO
 from typing import ByteString, List, Union
@@ -129,9 +130,60 @@ def load_image(image: ImageInput, **kwargs):
         raise NotImplementedError
 
 
-def fetch_images(images: List[ImageInput], **kwargs):
+def random_crop(image: Image.Image, crop_ratio: float = 0.6, **kwargs):
+    width, height = image.size
+    
+    # Calculate crop bounds based on crop_ratio
+    # If crop_ratio is 0.6, we keep at least 60% of the image.
+    # The "discardable" margin is (1 - crop_ratio) / 2 on each side.
+    margin = (1 - crop_ratio) / 2
+    crop_min = margin
+    crop_max = 1 - margin
+    
+    # Crop boundaries:
+    # left: 0 to crop_min * width
+    # right: crop_max * width to width
+    # top: 0 to crop_min * height
+    # bottom: crop_max * height to height
+    
+    left = random.randint(0, int(crop_min * width))
+    right = random.randint(int(crop_max * width), width)
+    top = random.randint(0, int(crop_min * height))
+    bottom = random.randint(int(crop_max * height), height)
+    
+    # Ensure valid crop (right > left, bottom > top) - guaranteed by logic above if crop_max > crop_min
+    image = image.crop((left, top, right, bottom))
+    return image
+
+
+def random_resize(image: Image.Image, min_ratio=0.5, max_ratio=1.5):
+    ratio = random.uniform(min_ratio, max_ratio)
+    new_width = int(image.width * ratio)
+    new_height = int(image.height * ratio)
+    return image.resize((new_width, new_height))
+
+
+def fetch_images(
+    images: List[ImageInput],
+    do_random_crop: bool = False,
+    crop_ratio: float = 0.6,
+    resize_ratio: float = 0.5,
+    **kwargs
+):
     images = [load_image(image, **kwargs) for image in images]
     max_image_nums = kwargs.get("max_image_nums", len(images))
     images = images[:max_image_nums]
+    
+    if do_random_crop:
+        images = [random_crop(image, crop_ratio=crop_ratio, **kwargs) for image in images]
+        
+        # resize_ratio defines the minimum scale. Max scale is symmetric around 1.0?
+        # Or simply [resize_ratio, 2 - resize_ratio] as discussed.
+        # If resize_ratio is 0.5, range is [0.5, 1.5].
+        min_ratio = resize_ratio
+        max_ratio = 2 - resize_ratio
+        
+        images = [random_resize(image, min_ratio=min_ratio, max_ratio=max_ratio) for image in images]
+    
     images = [smart_resize(image, **kwargs) for image in images]
     return images

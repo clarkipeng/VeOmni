@@ -154,6 +154,9 @@ def main():
         max_pixel_size=args.data.max_pixel_size,
         generation_ratio=args.data.generation_ratio,
         scale_factor=args.data.scale_factor,
+        do_random_crop=args.data.do_random_crop,
+        crop_ratio=args.data.crop_ratio,
+        resize_ratio=args.data.resize_ratio,
     )
 
     if args.train.rmpad:

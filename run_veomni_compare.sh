@@ -88,21 +88,20 @@ else
   additional_args="--rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT}"
 fi
 
-# # Use the python explicitly from the currently active VIRTUAL_ENV
 # uv run torchrun \
 #   --nnodes=$NNODES \
 #   --nproc-per-node=$NPROC_PER_NODE \
 #   --node-rank=$NODE_RANK \
 #   $additional_args \
 #   tasks/omni/train_qwen2_vl.py \
-#   configs/multimodal/qwen3_vl/qwen3_vl_8b.yaml \
+#   configs/multimodal/qwen3_vl/qwen3_vl_8b_sft.yaml \
 #   2>&1 | tee veomni_compare.log
-# # Use the python explicitly from the currently active VIRTUAL_ENV
+
 uv run torchrun \
   --nnodes=$NNODES \
   --nproc-per-node=$NPROC_PER_NODE \
   --node-rank=$NODE_RANK \
   $additional_args \
   tasks/omni/train_qwen2_vl.py \
-  configs/multimodal/qwen3_vl/qwen3_vl_8b_sft.yaml \
+  configs/multimodal/qwen3_vl/qwen3_vl_moe_sft.yaml \
   2>&1 | tee veomni_compare.log
