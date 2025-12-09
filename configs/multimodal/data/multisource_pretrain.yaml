@@ -16,5 +16,5 @@ names:
   - sharegpt4v_captioner_sft
 schedule:
   - schedule_type: const
-    weights: [0.25, 0.15, 0.05, 0.05, 0.05, 0.2, 0.25]  # CAD: 80%, ShareGPT: 20%
+    # weights: [0.25, 0.15, 0.05, 0.05, 0.05, 0.2, 0.25]  # CAD: 80%, ShareGPT: 20%
 

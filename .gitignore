@@ -177,3 +177,4 @@ wikiart/
 sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json
 playground/playground/data/eval/mmbench/mmbench_dev_20230712.tsv
 playground/playground/data/eval/mmbench/mmbench_dev_cn_20231003.tsv
+**/*.jpg

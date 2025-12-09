@@ -3,7 +3,7 @@ set -x
 
 export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- FIX 1: Correct Library Path Precedence ---
 # We build the path string first, then export it once.
@@ -71,7 +71,7 @@ export PYTHONPATH="/home/ubuntu/VeOmni:$PYTHONPATH"
 # uv sync will PRUNE packages not in uv.lock. 
 # If you modify the env manually, use 'uv pip install' instead.
 # Assuming you want strict sync:
-uv sync --frozen --extra gpu --extra audio
+uv sync --extra gpu --extra audio # --frozen 
 # If you DO NOT want strict sync (preserve manual installs), comment above and use:
 # uv pip install -e .[gpu,audio]
 
@@ -94,14 +94,14 @@ fi
 #   --node-rank=$NODE_RANK \
 #   $additional_args \
 #   tasks/omni/train_qwen2_vl.py \
-#   configs/multimodal/qwen3_vl/qwen3_vl_8b_sft.yaml \
+#   configs/multimodal/qwen3_vl/qwen3_vl_8b_pt.yaml \
 #   2>&1 | tee veomni_compare.log
 
-uv run torchrun \
+uv run --extra gpu --extra audio torchrun \
   --nnodes=$NNODES \
   --nproc-per-node=$NPROC_PER_NODE \
   --node-rank=$NODE_RANK \
   $additional_args \
   tasks/omni/train_qwen2_vl.py \
-  configs/multimodal/qwen3_vl/qwen3_vl_moe_sft.yaml \
+  configs/multimodal/qwen3_vl/qwen3_vl_moe_pt.yaml \
   2>&1 | tee veomni_compare.log

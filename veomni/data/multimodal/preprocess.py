@@ -23,6 +23,7 @@ To add custom preprocessors, simply define a function and decorate it with @regi
 
 import random
 import re
+from typing import Any, Dict, List
 
 from ...utils.registry import Registry
 

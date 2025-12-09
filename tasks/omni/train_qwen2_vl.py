@@ -15,7 +15,8 @@ import wandb
 from PIL import Image
 from tqdm import trange
 
-from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict, dcp_to_torch_state_dict
+from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict
+
 from veomni.data import (
     OmniDataCollatorWithPacking,
     OmniDataCollatorWithPadding,
@@ -133,7 +134,7 @@ def save_and_upload_checkpoint(
     if args.train.checkpoint_upload_path and args.train.global_rank == 0:
         logger.info_rank0("Converting checkpoint to HuggingFace format for S3 upload...")
         hf_checkpoint_path = f"{checkpoint_path}_hf"
-        state_dict = dcp_to_torch_state_dict(save_checkpoint_path=checkpoint_path)
+        state_dict = ckpt_to_state_dict(save_checkpoint_path=checkpoint_path)
         save_model_weights(hf_checkpoint_path, state_dict, model_assets=[model_config, processor])
         
         # Explicitly save chat template to ensure it's correct
@@ -148,6 +149,10 @@ def save_and_upload_checkpoint(
         s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
         upload_checkpoint_to_s3(hf_checkpoint_path, s3_upload_path)
     
+    # Barrier to ensure all ranks wait for rank 0 to finish HF conversion and S3 upload
+    if args.train.checkpoint_upload_path:
+        dist.barrier()
+    
     return checkpoint_path
 
 
@@ -156,6 +161,43 @@ ROLE_MAPPING = {
     "human": "user",
     "gpt": "assistant",
 }
+
+
+def filter_conversation_images(conversations: List, num_images_to_keep: int) -> List:
+    """
+    Filter image placeholders from conversations to keep only the first N images.
+    
+    Image placeholders appear as ("image", ...) tuples in the conversation content.
+    This function removes image placeholders beyond num_images_to_keep.
+    """
+    if num_images_to_keep < 0:
+        return conversations
+    
+    filtered_conversations = []
+    image_count = 0
+    
+    for turn in conversations:
+        # Each turn is like [role, content1, content2, ...] or a dict
+        if isinstance(turn, dict):
+            # Dict format: {"role": ..., "content": ...}
+            filtered_conversations.append(turn)
+            continue
+            
+        if isinstance(turn, list) and len(turn) > 0:
+            filtered_turn = [turn[0]]  # Keep role
+            for item in turn[1:]:
+                if isinstance(item, tuple) and len(item) >= 1 and item[0] == "image":
+                    if image_count < num_images_to_keep:
+                        filtered_turn.append(item)
+                        image_count += 1
+                    # else: skip this image placeholder
+                else:
+                    filtered_turn.append(item)
+            filtered_conversations.append(filtered_turn)
+        else:
+            filtered_conversations.append(turn)
+    
+    return filtered_conversations
 
 
 def process_sample(
@@ -218,27 +260,67 @@ def process_sample(
     tokenized_example["position_ids"] = position_ids.squeeze().clone()  # (dim, l)
     # clone here as text_only data is (1, l).expand(dim, -1),
 
-    # [SEQ_OVERFLOW] Log warning if sequence exceeds max_seq_len
+    # [SEQ_OVERFLOW] Handle sequences exceeding max_seq_len
     seq_len = position_ids.shape[-1]
+    truncate_overflow = kwargs.get("truncate_overflow", True)
+    has_images = image_grid_thw is not None and len(image_grid_thw) > 0
+    num_images = len(image_grid_thw) if has_images else 0
+    
     if seq_len > max_seq_len:
-        logger.warning(
-            f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len {max_seq_len} "
-            f"(overflow: {seq_len - max_seq_len} tokens, "
-            f"{100 * (seq_len - max_seq_len) / max_seq_len:.1f}%) - DROPPING SAMPLE")
-        return []
-    # if seq_len > 32768:
-    #     logger.warning(
-    #         f"INPUT [SEQ_OVERFLOW] Sequence length {seq_len} exceeds max_seq_len 32768 "
-    #         f"(overflow: {seq_len - 32768} tokens, "
-    #         f"{100 * (seq_len - 32768) / 32768:.1f}%)")
-    #     if image_grid_thw is not None:
-    #         logger.warning(f"INPUT [SEQ_OVERFLOW] Sample has {image_grid_thw.shape[0]} images: {image_grid_thw.tolist()}")
+        if has_images and truncate_overflow:
+            # Remove all images and reprocess - will truncate text if needed
+            logger.debug(
+                f"INPUT [SEQ_OVERFLOW] Sequence {seq_len} > max {max_seq_len} - "
+                f"removing {num_images} images and reprocessing")
+            sample_no_images = {k: v for k, v in sample.items() if k != "images"}
+            sample_no_images["images"] = []
+            if "conversations" in sample_no_images and sample_no_images["conversations"]:
+                sample_no_images["conversations"] = filter_conversation_images(sample_no_images["conversations"], 0)
+            if "messages" in sample_no_images and sample_no_images["messages"]:
+                sample_no_images["messages"] = filter_conversation_images(sample_no_images["messages"], 0)
+            return process_sample(sample_no_images, processor, chat_template, position_id_func, max_seq_len, **kwargs)
+            
+        elif has_images:
+            # truncate_overflow=False: drop multimodal samples that overflow
+            logger.debug(
+                f"INPUT [SEQ_OVERFLOW] Multimodal sequence {seq_len} > max {max_seq_len} - DROPPING (has {num_images} images)")
+            return []
+        elif truncate_overflow:
+            # Text-only truncation - image_inputs should be empty here
+            logger.debug(
+                f"INPUT [SEQ_OVERFLOW] Text-only sequence {seq_len} > max {max_seq_len} - TRUNCATING")
+            keys_to_truncate = ["input_ids", "attention_mask", "labels"]
+            for k in keys_to_truncate:
+                if k in tokenized_example and tokenized_example[k] is not None:
+                    tokenized_example[k] = tokenized_example[k][:max_seq_len]
+            # position_ids is 3D (1, 3, seq_len) or (3, seq_len) - slice last dimension
+            tokenized_example["position_ids"] = position_ids[..., :max_seq_len].squeeze().clone()
+            # Defensive: clear any image data when truncating
+            image_inputs = {}
+            image_grid_thw = None
+        else:
+            logger.debug(
+                f"INPUT [SEQ_OVERFLOW] Sequence {seq_len} > max {max_seq_len} - DROPPING SAMPLE")
+            return []
 
     tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
     tokenized_example["video_mask"] = tokenized_example["input_ids"] == VIDEO_INPUT_INDEX
     tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
     tokenized_example["input_ids"][tokenized_example["video_mask"]] = 0
-    tokenized_example.update(image_inputs)
+    
+    # Only include image_inputs if we actually have images
+    # This prevents stale image_grid_thw from being included for text-only samples
+    if image_grid_thw is not None and len(image_grid_thw) > 0:
+        tokenized_example.update(image_inputs)
+    
+    # Defensive assertion: position_ids must match input_ids length
+    final_seq_len = tokenized_example["input_ids"].shape[-1]
+    pos_len = tokenized_example["position_ids"].shape[-1]
+    assert final_seq_len == pos_len, (
+        f"FATAL: position_ids length ({pos_len}) != input_ids length ({final_seq_len}). "
+        f"image_grid_thw={'present' if image_grid_thw is not None else 'None'}"
+    )
+    
     return [tokenized_example]
 
 
@@ -320,6 +402,7 @@ def main():
         config_kwargs = {"attn_implementation":args.model.attn_implementation},
         init_device=args.train.init_device,
         force_use_huggingface=args.model.force_use_huggingface,
+        moe_implementation=args.model.moe_implementation,
     )
     model_config = model.config
     helper.print_device_mem_info("VRAM usage after building model")
@@ -343,6 +426,7 @@ def main():
         chat_template=chat_template,
         position_id_func=position_id_func,
         max_seq_len=args.data.max_seq_len,
+        truncate_overflow=args.data.truncate_overflow,
     )
 
     if args.train.rmpad:
@@ -376,6 +460,7 @@ def main():
     args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, dataset_length)
 
     train_dataloader = build_dataloader(
+        dataloader_type=args.data.dataloader_type,
         dataset=train_dataset,
         micro_batch_size=args.train.micro_batch_size,
         global_batch_size=args.train.global_batch_size,
@@ -421,6 +506,7 @@ def main():
                 val_steps = max(1, len(val_dataset) // args.train.global_batch_size)
             
             val_dataloader = build_dataloader(
+                dataloader_type=args.data.dataloader_type,
                 dataset=val_dataset,
                 micro_batch_size=args.train.micro_batch_size,
                 global_batch_size=args.train.global_batch_size,
@@ -440,14 +526,18 @@ def main():
                 drop_last=False,  # Don't drop last batch in validation
             )
             logger.info_rank0(f"Validation dataset built with {len(val_dataset) if hasattr(val_dataset, '__len__') else 'unknown'} samples")
-    else:
-        raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
 
     fsdp_kwargs = {}
-    if args.train.freeze_vit:
-        model.visual.requires_grad_(False)
-        if args.train.data_parallel_mode == "fsdp1":
-            fsdp_kwargs["use_orig_params"] = True
+    # Note: freeze_vit needs to be applied AFTER build_parallelize_model because
+    # model.to_empty() during weight loading resets requires_grad
+    if args.train.freeze_vit and args.train.data_parallel_mode == "fsdp1":
+        fsdp_kwargs["use_orig_params"] = True
+
+    # Get basic modules from model, and add patched class names if using torchtitan MoE
+    basic_modules = list(model._no_split_modules) if model._no_split_modules else []
+    if args.model.moe_implementation == "torchtitan":
+        basic_modules.append("Qwen3VLMoeTextTitanDecoderLayer")
+        basic_modules.append("Qwen3MoeTitanDecoderLayer")
 
     model = build_parallelize_model(
         model,
@@ -458,17 +548,27 @@ def main():
         init_device=args.train.init_device,
         enable_fsdp_offload=args.train.enable_fsdp_offload,
         fsdp_kwargs=fsdp_kwargs,
-        basic_modules=model._no_split_modules,
+        basic_modules=basic_modules,
         enable_reentrant=args.train.enable_reentrant,
         enable_forward_prefetch=args.train.enable_forward_prefetch,
+        enable_compile=args.train.enable_compile,
     )
+    
+    # Freeze ViT AFTER model is parallelized and weights are loaded
+    # This must happen after build_parallelize_model because to_empty() resets requires_grad
+    # Note: Qwen3VL structure is model.model.visual (not model.visual)
+    if args.train.freeze_vit:
+        model.model.visual.requires_grad_(False)
+    # Get param groups and log counts
+    param_groups = get_param_groups(model, args.train.lr, args.train.vit_lr)
+    
     optimizer = build_optimizer(
         model,
         lr=args.train.lr,
         weight_decay=args.train.weight_decay,
         fused=False,
         optimizer_type=args.train.optimizer,
-        param_groups=get_param_groups(model, args.train.lr, args.train.vit_lr),
+        param_groups=param_groups,
     )
     lr_scheduler = build_lr_scheduler(
         optimizer,
@@ -538,9 +638,6 @@ def main():
         args.train.enable_activation_offload, args.train.enable_gradient_checkpointing, args.train.activation_gpu_limit
     )
 
-    # if args.train.enable_compile:
-    #     logger.info_rank0("Compiling model with torch.compile...")
-    #     model = torch.compile(model)
 
     model.train()
     logger.info(
@@ -597,7 +694,7 @@ def main():
                                 
                                 decoded = tokenizer.decode(clean_input_ids, skip_special_tokens=False)
                                 f.write(f"Decoded : {decoded}...\n\n")
-                                logger.info_rank0(f"Decoded Input (MB {mb_idx}):\n{decoded}...")
+                                # logger.info_rank0(f"Decoded Input (MB {mb_idx}):\n{decoded}...")
                             except Exception as e:
                                 f.write(f"Could not decode: {e}\n\n")
                                 logger.warning(f"Could not decode input: {e}")
@@ -620,7 +717,7 @@ def main():
                                         clean_labels.append(tid)
                                 decoded_labels = tokenizer.decode(clean_labels, skip_special_tokens=False)
                                 f.write(f"Decoded Targets (first 1000 chars): {decoded_labels[:1000]}...\n\n")
-                                logger.info_rank0(f"Decoded Targets (MB {mb_idx}):\n{decoded_labels[:1000]}...")
+                                # logger.info_rank0(f"Decoded Targets (MB {mb_idx}):\n{decoded_labels[:1000]}...")
                             except Exception as e:
                                 f.write(f"Could not decode labels: {e}\n\n")
 

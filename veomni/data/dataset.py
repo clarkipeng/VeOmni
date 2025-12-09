@@ -422,7 +422,7 @@ def build_interleave_dataset(
     if len(schedule) > 1 or schedule[0]["schedule_type"] != "const":
         logger.info_rank0("Interleaved dataset only supports const schedule type.")
 
-    weights = schedule[0]["weights"]
+    weights = schedule[0].get("weights", None)  # None = round-robin
 
     datasets = []
     if datasets_type == "iterable":
@@ -459,18 +459,6 @@ def build_interleave_dataset(
             ds = ds.add_column("ds_idx", [idx] * len(ds))
             ds = ds.add_column("source_name", [source_names[idx]] * len(ds))
             datasets.append(ds)
-        
-        # Auto-calculate weights based on dataset sizes if weights is "auto" or None
-        if weights == "auto" or weights is None:
-            total_size = sum(dataset_sizes)
-            if total_size > 0:
-                weights = [size / total_size for size in dataset_sizes]
-                logger.info_rank0(f"Auto-calculated weights based on dataset sizes: {weights}")
-                logger.info_rank0(f"Dataset sizes: {dict(zip(source_names, dataset_sizes))}")
-            else:
-                # Fallback to equal weights if all datasets are empty
-                weights = [1.0 / len(sources)] * len(sources)
-                logger.info_rank0(f"All datasets empty, using equal weights: {weights}")
         
         return InterleavedMappingDataset(
             interleave_datasets(datasets=datasets, probabilities=weights, seed=seed),

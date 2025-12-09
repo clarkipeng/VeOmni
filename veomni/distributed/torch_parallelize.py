@@ -399,6 +399,11 @@ def parallelize_model_fsdp2(
         else:
             logger.info_rank0("Every rank would read weights from disk and expect this to be slow!")
             load_model_weights(model, weights_path, get_device_type(), dtensor_factory=distribute_tensor)
+        
+        # Initialize TorchTitan MoE buffers after weight loading
+        # These buffers (tokens_per_expert, expert_bias) contain uninitialized memory after to_empty()
+        from veomni.models.model_patch import initialize_moe_buffers
+        initialize_moe_buffers(model)
 
     # Register grad norm clipping method for FSDP2
     from .fsdp2 import clip_grad_norm as clip_grad_norm_fn
@@ -445,6 +450,10 @@ def build_parallelize_model(
                 "context_fn": kwargs.pop("recompute_context_fn", noop_context_fn),
             },
         )
+
+    if kwargs.get("enable_compile", False):
+        from veomni.models.model_patch import apply_compile
+        apply_compile(model)
 
     if parallel_state.tp_enabled:
         logger.info_rank0("Apply tensor parallel to the model.")

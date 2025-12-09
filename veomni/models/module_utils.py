@@ -289,6 +289,13 @@ def load_model_weights(
     if hasattr(model, "get_parallel_plan"):
         parallel_plan = model.get_parallel_plan()
 
+    # Check if model uses TorchTitan MoE (by checking for router.gate pattern in parameter names)
+    uses_tt_moe = any(".mlp.router.gate.weight" in name or ".mlp.experts.w1" in name for name in parameter_names_to_load)
+    
+    if uses_tt_moe:
+        from .model_patch import convert_hf_moe_key_to_tt, convert_hf_moe_tensor_to_tt, is_moe_layer_key
+        logger.info_rank0("Detected TorchTitan MoE model, enabling weight conversion from HuggingFace format")
+
     state_dict_iterators = _load_state_dict(weights_path)
     for state_dict_iterator in tqdm(
         state_dict_iterators, desc="Loading checkpoint shards", disable=int(os.getenv("LOCAL_RANK", "-1")) > 0
@@ -297,6 +304,22 @@ def load_model_weights(
             # IMPORTANT: Call this function to adapt to transformers 4.52 breaking change
             # on model structure. See the comment for details.
             name = _convert_weight_key(name, model)
+
+            # Apply MoE weight conversion if using TorchTitan MoE
+            if uses_tt_moe and is_moe_layer_key(name):
+                converted_items = convert_hf_moe_tensor_to_tt(name, tensor)
+                for converted_name, converted_tensor in converted_items:
+                    # Also apply key conversion (e.g., gate.weight -> router.gate.weight)
+                    converted_name, _ = convert_hf_moe_key_to_tt(converted_name)
+                    
+                    if converted_name in buffer_dict.keys():
+                        buffer_dict[converted_name] = converted_tensor.clone()
+                    elif converted_name in parameter_names_to_load:
+                        parameter_names_to_load.remove(converted_name)
+                        _dispatch_parameter(model, converted_name, converted_tensor, dtensor_factory, parallel_plan)
+                    else:
+                        logger.info_rank0(f"Unexpected key after MoE conversion: {converted_name}.")
+                continue  # Skip the normal processing since we handled it above
 
             if name in buffer_dict.keys():  # persistent buffers
                 buffer_dict[name] = tensor.clone()
@@ -310,6 +333,7 @@ def load_model_weights(
         empty_cache()
 
     post_process_after_weight_loading(model, buffer_dict, parameter_names_to_load, dtensor_factory)
+
 
 
 @torch.no_grad()

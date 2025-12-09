@@ -1,5 +1,6 @@
 model:
-  model_path: Qwen/Qwen3-VL-8B-Instruct
+  # model_path: Qwen/Qwen3-VL-8B-Instruct
+  model_path: 0.25_5e-5_vitfreeze_25-mix_full/checkpoints/global_step_6386_hf
   attn_implementation: flash_attention_2
 
 data:
@@ -13,6 +14,8 @@ data:
   template_path: templates/qwen-plan-vl-sft.jinja
   max_seq_len: 32768
   train_size: -1
+  do_random_crop: true
+  crop_ratio: 0.6
   mm_configs:
     source: null  # Will handle "messages" format automatically
     image_bucket: grabcad  # S3 bucket for images
@@ -31,12 +34,12 @@ train:
   lr_warmup_ratio: 0.007
   lr_decay_style: cosine
   weight_decay: 0.1
-  output_dir: "8b_1e-5_deepfry_80split_crop"
+  output_dir: "8b_sft_continue"
   data_parallel_mode: fsdp2
   enable_reentrant: false
   use_wandb: true
   wandb_project: "gcd-run-42_vl_sft"
-  wandb_name: "8b_1e-5_deepfry_80split_crop"
+  wandb_name: "8b_sft_continue"
   rmpad: false
   rmpad_with_pos_ids: true
   ulysses_parallel_size: 1
@@ -49,7 +52,7 @@ train:
   ckpt_manager: dcp
   save_hf_weights: false
   allow_cuda_launch_blocking: false
-  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/8b_1e-5_deepfry_80split_crop # S3 path for auto-upload
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/8b_sft_continue # S3 path for auto-upload
   # memory ops
   enable_mixed_precision: true
   optimizer: "adamw"

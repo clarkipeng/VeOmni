@@ -85,7 +85,7 @@ class ModelArguments:
         default="flash_attention_2",
         metadata={"help": "Attention implementation to use."},
     )
-    moe_implementation: Optional[Literal[None, "eager", "fused"]] = field(
+    moe_implementation: Optional[Literal[None, "eager", "fused", "torchtitan"]] = field(
         default=None,
         metadata={"help": "MoE implementation to use."},
     )
@@ -239,6 +239,10 @@ class DataArguments:
     resize_ratio: float = field(
         default=0.3333333,
         metadata={"help": "Minimum scale factor for random resize. Max scale will be 2 - resize_ratio. Default 0.5 (range 0.5-1.5)."},
+    )
+    truncate_overflow: bool = field(
+        default=False,
+        metadata={"help": "If True, truncate sequences exceeding max_seq_len. If False, drop them."},
     )
 
     def __post_init__(self):
