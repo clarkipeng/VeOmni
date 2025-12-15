@@ -1,7 +1,12 @@
 import datetime
 import json
 import os
+
+# Set custom allocator settings early to avoid fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import sys
+import multiprocessing
 import time
 from dataclasses import asdict, dataclass, field
 from functools import partial
@@ -100,7 +105,6 @@ def upload_checkpoint_to_s3(local_path: str, s3_path: str) -> None:
     except Exception as e:
         logger.error(f"Unexpected error during S3 upload: {e}")
 
-
 def save_and_upload_checkpoint(
     Checkpointer,
     save_checkpoint_path: str,
@@ -133,22 +137,28 @@ def save_and_upload_checkpoint(
     # Convert to HF and upload to S3 if configured
     if args.train.checkpoint_upload_path and args.train.global_rank == 0:
         logger.info_rank0("Converting checkpoint to HuggingFace format for S3 upload...")
-        hf_checkpoint_path = f"{checkpoint_path}_hf"
-        state_dict = ckpt_to_state_dict(save_checkpoint_path=checkpoint_path)
-        save_model_weights(hf_checkpoint_path, state_dict, model_assets=[model_config, processor])
+        hf_weights_path = os.path.join(checkpoint_path, "hf_ckpt")
+        model_state_dict = ckpt_to_state_dict(
+            save_checkpoint_path=checkpoint_path,
+        )
+        model_assets = [model_config, processor]
+        save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
         
-        # Explicitly save chat template to ensure it's correct
-        if hasattr(processor.tokenizer, "chat_template") and processor.tokenizer.chat_template:
-            template_file = os.path.join(hf_checkpoint_path, "chat_template.jinja")
-            with open(template_file, "w") as f:
-                f.write(processor.tokenizer.chat_template)
-            logger.info_rank0(f"Explicitly saved chat template to {template_file}")
+        del model_state_dict, model_assets
+        helper.empty_cache()
 
-        logger.info_rank0(f"HF checkpoint saved at {hf_checkpoint_path}")
+        # # Explicitly save chat template to ensure it's correct
+        # if hasattr(processor.tokenizer, "chat_template") and processor.tokenizer.chat_template:
+        #     template_file = os.path.join(hf_weights_path, "chat_template.jinja")
+        #     with open(template_file, "w") as f:
+        #         f.write(processor.tokenizer.chat_template)
+        #     logger.info_rank0(f"Explicitly saved chat template to {template_file}")
+        
+        logger.info_rank0(f"HF checkpoint saved at {hf_weights_path}")
         
         s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{global_step}"
-        upload_checkpoint_to_s3(hf_checkpoint_path, s3_upload_path)
-    
+        upload_checkpoint_to_s3(hf_weights_path, s3_upload_path)
+        
     # Barrier to ensure all ranks wait for rank 0 to finish HF conversion and S3 upload
     if args.train.checkpoint_upload_path:
         dist.barrier()
@@ -372,7 +382,7 @@ def main():
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     get_torch_device().set_device(f"{get_device_type()}:{args.train.local_rank}")
-    dist.init_process_group(backend=get_dist_comm_backend())
+    dist.init_process_group(backend=get_dist_comm_backend(), timeout=datetime.timedelta(minutes=60))
     helper.set_seed(args.train.seed, args.train.enable_full_determinism)
     if args.train.local_rank == 0:
         helper.enable_third_party_logging()
@@ -646,6 +656,8 @@ def main():
     for epoch in range(start_epoch, args.train.num_train_epochs):
         if hasattr(train_dataloader, "set_epoch"):
             train_dataloader.set_epoch(epoch)
+        elif hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
+            train_dataloader.sampler.set_epoch(epoch)
 
         data_loader_tqdm = trange(
             args.train.train_steps,
@@ -750,7 +762,6 @@ def main():
                 }
                 with model_fwd_context:
                     loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss / len(micro_batches)
-                # loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss / len(micro_batches)
 
                 with model_bwd_context:
                     loss.backward()
@@ -796,53 +807,61 @@ def main():
                 if global_step == args.train.profile_end_step:
                     profiler.stop()
                     print(profiler.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
-            # Run validation at specified steps if eval_steps is set
-            if val_dataloader is not None and args.train.eval_steps and global_step % args.train.eval_steps == 0:
-                logger.info_rank0(f"Running validation at step {global_step}...")
-                model.eval()
-                val_loss = 0.0
-                val_num_batches = 0
+            # # Run validation at specified steps if eval_steps is set
+            # if val_dataloader is not None and args.train.eval_steps and global_step % args.train.eval_steps == 0:
+            #     logger.info_rank0(f"Running validation at step {global_step}...")
+            #     model.eval()
+            #     val_loss = 0.0
+            #     val_num_batches = 0
                 
-                with torch.no_grad():
-                    val_iterator = iter(val_dataloader)
-                    try:
-                        # Limit validation to a reasonable number of batches
-                        max_val_batches = 50
-                        for _ in range(max_val_batches):
-                            try:
-                                micro_batches: List[Dict[str, Any]] = next(val_iterator)
-                            except StopIteration:
-                                break
+            #     with torch.no_grad():
+            #         val_iterator = iter(val_dataloader)
+            #         try:
+            #             # Limit validation to a reasonable number of batches
+            #             max_val_batches = 50
+            #             for _ in range(max_val_batches):
+            #                 try:
+            #                     micro_batches: List[Dict[str, Any]] = next(val_iterator)
+            #                 except StopIteration:
+            #                     break
                             
-                            for micro_batch in micro_batches:
-                                if args.data.enable_multisource:
-                                    micro_batch.pop("ds_idx", None)
-                                    micro_batch.pop("source_name", None)
+            #                 for micro_batch in micro_batches:
+            #                     if args.data.enable_multisource:
+            #                         micro_batch.pop("ds_idx", None)
+            #                         micro_batch.pop("source_name", None)
                                 
-                                micro_batch = {
-                                    k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
-                                    for k, v in micro_batch.items()
-                                }
+            #                     micro_batch = {
+            #                         k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
+            #                         for k, v in micro_batch.items()
+            #                     }
                                 
-                                with model_fwd_context:
-                                    loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
+            #                     with model_fwd_context:
+            #                         loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
                                 
-                                val_loss += loss.item()
-                                val_num_batches += 1
-                                del micro_batch
-                    except Exception as e:
-                        logger.warning(f"Error during validation: {e}")
+            #                     val_loss += loss.item()
+            #                     val_num_batches += 1
+            #                     del micro_batch
+            #         except Exception as e:
+            #             logger.warning(f"Error during validation: {e}")
                 
-                # Aggregate validation loss across all processes
-                if val_num_batches > 0:
-                    val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
-                    val_loss = val_loss / val_num_batches
-                    logger.info_rank0(f"Validation loss at step {global_step}: {val_loss:.4f} (over {val_num_batches} batches)")
+            #     # Aggregate validation loss across all processes
+            #     if val_num_batches > 0:
+            #         val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
+            #         val_loss = val_loss / val_num_batches
+            #         logger.info_rank0(f"Validation loss at step {global_step}: {val_loss:.4f} (over {val_num_batches} batches)")
                     
-                    if args.train.global_rank == 0 and args.train.use_wandb:
-                        wandb.log({"validation/loss": val_loss}, step=global_step)
+            #     if args.train.global_rank == 0 and args.train.use_wandb:
+            #             wandb.log({"validation/loss": val_loss}, step=global_step)
                 
-                model.train()
+            #     # Cleanup validation memory
+            #     if "val_iterator" in locals():
+            #         del val_iterator
+            #     if "micro_batches" in locals():
+            #         del micro_batches
+            #     import gc
+            #     gc.collect()
+                
+            #     model.train()
 
             if args.train.save_steps and global_step % args.train.save_steps == 0:
                 helper.empty_cache()
@@ -860,59 +879,70 @@ def main():
                 save_checkpoint_path = save_and_upload_checkpoint(
                     Checkpointer, args.train.save_checkpoint_path, state, global_step, args, model_config, processor
                 )
+                del state
+                helper.empty_cache()
 
         data_loader_tqdm.close()
         start_step = 0
         helper.print_device_mem_info(f"VRAM usage after epoch {epoch + 1}")
         
-        # Run validation at end of epoch if val_dataloader is available
-        if val_dataloader is not None:
-            logger.info_rank0("Running validation...")
-            model.eval()
-            val_loss = 0.0
-            val_num_batches = 0
-            val_num_samples = 0
+        # # Run validation at end of epoch if val_dataloader is available
+        # if val_dataloader is not None:
+        #     logger.info_rank0("Running validation...")
+        #     model.eval()
+        #     val_loss = 0.0
+        #     val_num_batches = 0
+        #     val_num_samples = 0
             
-            with torch.no_grad():
-                val_iterator = iter(val_dataloader)
-                try:
-                    while True:
-                        try:
-                            micro_batches: List[Dict[str, Any]] = next(val_iterator)
-                        except StopIteration:
-                            break
+        #     with torch.no_grad():
+        #         val_iterator = iter(val_dataloader)
+        #         try:
+        #             while True:
+        #                 try:
+        #                     micro_batches: List[Dict[str, Any]] = next(val_iterator)
+        #                 except StopIteration:
+        #                     break
                         
-                        for micro_batch in micro_batches:
-                            if args.data.enable_multisource:
-                                micro_batch.pop("ds_idx", None)
-                                micro_batch.pop("source_name", None)
+        #                 for micro_batch in micro_batches:
+        #                     if args.data.enable_multisource:
+        #                         micro_batch.pop("ds_idx", None)
+        #                         micro_batch.pop("source_name", None)
                             
-                            micro_batch = {
-                                k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
-                                for k, v in micro_batch.items()
-                            }
+        #                     micro_batch = {
+        #                         k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
+        #                         for k, v in micro_batch.items()
+        #                     }
                             
-                            with model_fwd_context:
-                                loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
+        #                     with model_fwd_context:
+        #                         loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss
                             
-                            val_loss += loss.item()
-                            val_num_batches += 1
-                            val_num_samples += micro_batch.get("input_ids", torch.tensor([])).shape[0] if isinstance(micro_batch.get("input_ids"), torch.Tensor) else 1
+        #                     val_loss += loss.item()
+        #                     val_num_batches += 1
+        #                     val_num_samples += micro_batch.get("input_ids", torch.tensor([])).shape[0] if isinstance(micro_batch.get("input_ids"), torch.Tensor) else 1
                             
-                            del micro_batch
-                except Exception as e:
-                    logger.warning(f"Error during validation: {e}")
+        #                     del micro_batch
+        #         except Exception as e:
+        #             logger.warning(f"Error during validation: {e}")
             
-            # Aggregate validation loss across all processes
-            val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
-            if val_num_batches > 0:
-                val_loss = val_loss / val_num_batches
-                logger.info_rank0(f"Validation loss at epoch {epoch + 1}: {val_loss:.4f} (over {val_num_batches} batches)")
+        #     # Aggregate validation loss across all processes
+        #     val_loss, val_num_batches = all_reduce((val_loss, val_num_batches), group=get_parallel_state().fsdp_group)
+        #     if val_num_batches > 0:
+        #         val_loss = val_loss / val_num_batches
+        #         logger.info_rank0(f"Validation loss at epoch {epoch + 1}: {val_loss:.4f} (over {val_num_batches} batches)")
                 
-                if args.train.global_rank == 0 and args.train.use_wandb:
-                    wandb.log({"validation/loss": val_loss, "validation/epoch": epoch + 1}, step=global_step)
+        #         if args.train.global_rank == 0 and args.train.use_wandb:
+        #             wandb.log({"validation/loss": val_loss, "validation/epoch": epoch + 1}, step=global_step)
             
-            model.train()
+        #     # Cleanup validation memory
+        #     if "val_iterator" in locals():
+        #         del val_iterator
+        #     if "micro_batches" in locals():
+        #         del micro_batches
+        #     import gc
+        #     gc.collect()
+        #     helper.empty_cache()
+            
+        #     model.train()
         
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
@@ -930,9 +960,12 @@ def main():
             save_checkpoint_path = save_and_upload_checkpoint(
                 Checkpointer, args.train.save_checkpoint_path, state, global_step, args, model_config, processor
             )
+            del state
+            helper.empty_cache()
 
     synchronize()
     # release memory
+    del loss
     del optimizer, lr_scheduler
     helper.empty_cache()
     # save model in huggingface's format
@@ -941,11 +974,12 @@ def main():
             hf_weights_path = os.path.join(save_checkpoint_path, "hf_ckpt")
             model_state_dict = ckpt_to_state_dict(
                 save_checkpoint_path=save_checkpoint_path,
-                output_dir=args.train.output_dir,
-                ckpt_manager=args.train.ckpt_manager,
             )
             save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
             
+            del model_state_dict
+            helper.empty_cache()
+
             # Explicitly save chat template to ensure it's correct
             # Note: model_assets[1] is processor
             proc = model_assets[1]
@@ -962,7 +996,7 @@ def main():
                 final_global_step = save_checkpoint_path.split("_")[-1]
                 s3_upload_path = f"{args.train.checkpoint_upload_path}/global_step_{final_global_step}"
                 upload_checkpoint_to_s3(hf_weights_path, s3_upload_path)
-
+                
     dist.barrier()
     dist.destroy_process_group()
 

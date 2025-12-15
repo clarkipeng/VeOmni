@@ -1,4 +1,4 @@
-"""Model patching utilities."""
+from typing import Dict
 
 import re
 import torch
@@ -183,10 +183,113 @@ def initialize_moe_buffers(model: nn.Module) -> None:
     for name, buf in model.named_buffers():
         if "mlp.tokens_per_expert" in name or "mlp.expert_bias" in name:
             buf.zero_()
-            initialized_count += 1
-            logger.debug(f"Zeroed MoE buffer: {name}")
+            # initialized_count += 1
+            # logger.debug(f"Zeroed MoE buffer: {name}")
     
-    if initialized_count > 0:
-        logger.info(f"Initialized {initialized_count} TorchTitan MoE buffers")
+    # if initialized_count > 0:
+    #     logger.info(f"Initialized {initialized_count} TorchTitan MoE buffers")
 
 
+
+def convert_tt_moe_state_dict_to_hf(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Convert a TorchTitan MoE state dict back to HuggingFace format.
+    
+    TT format: layers.{i}.mlp.router.gate.weight, layers.{i}.mlp.experts.w1/w2/w3
+    HF format: layers.{i}.mlp.gate.weight, layers.{i}.mlp.experts.gate_up_proj, layers.{i}.mlp.experts.down_proj
+    """
+    from collections import defaultdict
+    
+    new_state_dict = {}
+    experts_weights = defaultdict(dict)
+    
+    for key, tensor in state_dict.items():
+        # Handle expert_bias -> gate.e_score_correction_bias
+        if "mlp.expert_bias" in key:
+            new_key = key.replace(".mlp.expert_bias", ".mlp.gate.e_score_correction_bias")
+            new_state_dict[new_key] = tensor
+            continue
+
+        # Skip tokens_per_expert
+        if "mlp.tokens_per_expert" in key:
+            continue
+            
+        # Router gate: mlp.router.gate.weight -> mlp.gate.weight
+        if ".mlp.router.gate.weight" in key:
+            new_key = key.replace(".mlp.router.gate.weight", ".mlp.gate.weight")
+            new_state_dict[new_key] = tensor
+            continue
+
+        # Shared Experts
+        if ".mlp.shared_expert." in key:
+            # mlp.shared_expert.w1 -> mlp.shared_experts.gate_proj.weight
+            # mlp.shared_expert.w2 -> mlp.shared_experts.down_proj.weight
+            # mlp.shared_expert.w3 -> mlp.shared_experts.up_proj.weight
+            if ".w1" in key:
+                new_key = key.replace(".mlp.shared_expert.w1", ".mlp.shared_experts.gate_proj.weight")
+                # Check for singleton dimension if needed (BlobLearn logic: if shape[0]==1, squeeze)
+                if tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
+                new_state_dict[new_key] = tensor
+            elif ".w2" in key:
+                new_key = key.replace(".mlp.shared_expert.w2", ".mlp.shared_experts.down_proj.weight")
+                if tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
+                new_state_dict[new_key] = tensor
+            elif ".w3" in key:
+                new_key = key.replace(".mlp.shared_expert.w3", ".mlp.shared_experts.up_proj.weight")
+                if tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
+                new_state_dict[new_key] = tensor
+            else:
+                new_state_dict[key] = tensor
+            continue
+            
+        # Experts
+        if ".mlp.experts." in key:
+            # Group by base key (everything before w1/w2/w3)
+            if ".w1" in key:
+                base_key = key.replace(".w1", "")
+                experts_weights[base_key]["w1"] = tensor
+            elif ".w3" in key:
+                base_key = key.replace(".w3", "")
+                experts_weights[base_key]["w3"] = tensor
+            elif ".w2" in key:
+                # w2 corresponds to down_proj directly (with transpose)
+                new_key = key.replace(".mlp.experts.w2", ".mlp.experts.down_proj")
+                # TT w2: (num_experts, hidden_size, intermediate_size)
+                # HF down_proj: (num_experts, intermediate_size, hidden_size)
+                new_state_dict[new_key] = tensor.transpose(1, 2).contiguous()
+            else:
+                # Other expert keys (bias?) - keep as is
+                new_state_dict[key] = tensor
+            continue
+            
+        new_state_dict[key] = tensor
+        
+    # Process grouped w1/w3 to form gate_up_proj
+    for base_key, weights in experts_weights.items():
+        if "w1" in weights and "w3" in weights:
+            w1 = weights["w1"]  # (num_experts, intermediate_size, hidden_size)
+            w3 = weights["w3"]  # (num_experts, intermediate_size, hidden_size)
+            
+            # TT w1 is gate, w3 is up
+            # HF gate_up_proj expects: (num_experts, hidden_size, 2 * intermediate_size)
+            # where the last dim is [gate; up]
+            
+            # Transpose to (num_experts, hidden_size, intermediate_size)
+            gate_proj = w1.transpose(1, 2)
+            up_proj = w3.transpose(1, 2)
+            
+            # Concatenate along last dim
+            gate_up_proj = torch.cat([gate_proj, up_proj], dim=-1)
+            
+            new_key = base_key.replace(".mlp.experts", ".mlp.experts.gate_up_proj")
+            new_state_dict[new_key] = gate_up_proj
+        else:
+            logger.warning(f"Missing w1 or w3 for {base_key}, cannot reconstruct gate_up_proj")
+            # Should we add them back individually? Usually implies corruption or partial loading
+            for sub_key, tensor in weights.items():
+                new_state_dict[f"{base_key}.{sub_key}"] = tensor
+
+    return new_state_dict

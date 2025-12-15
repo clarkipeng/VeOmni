@@ -32,11 +32,7 @@ from torch.optim.optimizer import Optimizer
 from ..distributed.parallel_state import get_parallel_state
 from ..utils import logging
 from ..utils.import_utils import is_torch_npu_available
-
-try:
-    from dion import Muon
-except ImportError:
-    Muon = None
+from dion import Muon
 
 
 logger = logging.get_logger(__name__)

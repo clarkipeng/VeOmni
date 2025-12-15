@@ -1,9 +1,9 @@
 sources:
-  - s3://camfer-spice/gcd-run-42/sft-vlm/sft
+  - s3://camfer-spice/gcd-run-42/sft-all-vlm/train
   - sharegpt4v_cap_100k/sharegpt4v_instruct_gpt4-vision_cap100k.json
   - nvidia/Nemotron-Post-Training-Dataset-v2
 names:
-  - sft-vlm
+  - sft-all-vlm
   - sharegpt4v_captioner_sft
   - nemotron-sft
 schedule:

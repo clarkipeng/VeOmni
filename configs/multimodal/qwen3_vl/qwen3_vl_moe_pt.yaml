@@ -1,6 +1,6 @@
 model:
   model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
-  # fused is 8310 tok/s
+  # fused is 8310 tok/s, tt is 13k
   moe_implementation: torchtitan
   attn_implementation: flash_attention_2
 
@@ -24,7 +24,7 @@ data:
     image_bucket: grabcad  # S3 bucket for images
 
 train:
-  enable_compile: false
+  enable_compile: true
   enable_profiling: false
 
   freeze_vit: true

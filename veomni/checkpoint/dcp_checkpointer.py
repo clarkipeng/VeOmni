@@ -17,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
+    StateDictOptions,
 )
 from torch.distributed.checkpoint.state_dict_loader import _load_state_dict
 from torch.distributed.checkpoint.stateful import Stateful
@@ -43,18 +44,15 @@ class ModelState(Stateful):
 
     def __init__(self, model):
         self.model = model
-
-        # Determine whether this is EP+FSDP2 case
-        # If so, we need to restore EP-dim before saving to DCP
-        # For FSDP1, it is implemented by FSDPExtension and state_dict hooks
-        # which is aumatically triggered by get_model_state_dict
         self.parallel_state = get_parallel_state()
         self.ep_fqn2spec_info = getattr(self.model, "_fqn2spec_info", None)
         self.should_ep_aware = self.ep_fqn2spec_info is not None and self.parallel_state.dp_mode == "fsdp2"
 
     @torch.no_grad()
     def state_dict(self):
-        model_state_dict = get_model_state_dict(model=self.model)
+        # Offload to CPU to prevent VRAM spikes/retention
+        options = StateDictOptions(cpu_offload=True)
+        model_state_dict = get_model_state_dict(model=self.model, options=options)
         if self.should_ep_aware:
             logger.info_rank0(
                 "Getting model state_dict from ModelState wrapper, would restore EP dim for Experts module"
@@ -131,7 +129,8 @@ class OptimizerState(Stateful):
             return optim_sd_with_ep_dim
 
         # Single torch optimizer
-        sd = get_optimizer_state_dict(model=self.model, optimizers=self.optimizer)
+        options = StateDictOptions(cpu_offload=True)
+        sd = get_optimizer_state_dict(model=self.model, optimizers=self.optimizer, options=options)
         return sd
 
     def load_state_dict(self, state_dict):
@@ -303,7 +302,7 @@ class DistributedCheckpointer(CheckpointerBase):
         if storage_writer is None:
             storage_writer = FileSystemWriter(
                 checkpoint_dir,
-                thread_count=16,
+                thread_count=1,
                 single_file_per_rank=True,
                 sync_files=False,
             )
@@ -332,6 +331,10 @@ class DistributedCheckpointer(CheckpointerBase):
             )
             if dist.is_initialized():
                 dist.barrier()
+            
+            # Explicitly release references to massive objects
+            del save_state
+            del storage_writer
             gc.collect()
             empty_cache()
             synchronize()

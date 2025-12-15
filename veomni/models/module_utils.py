@@ -574,14 +574,28 @@ def save_model_weights(
         hdfs_dir = None
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # Check for TorchTitan MoE keys and convert back to HF format if needed
+    has_tt_moe_keys = any(
+        ".mlp.router.gate.weight" in k or 
+        ".mlp.experts.w1" in k or
+        ".mlp.expert_bias" in k
+        for k in state_dict.keys()
+    )
+    if has_tt_moe_keys:
+        from .model_patch import convert_tt_moe_state_dict_to_hf
+        logger.info(f"Detected TorchTitan MoE keys, converting back to HuggingFace format for saving.")
+        state_dict = convert_tt_moe_state_dict_to_hf(state_dict)
+
     is_sharded, total_size, weight_map = _get_shard_info(state_dict, save_dtype, shard_size, safe_serialization)
     full_state_dict = OrderedDict()
     prev_file_name = None
     for name, tensor in state_dict.items():
-        if hasattr(tensor.data, "full_tensor"):  # dtensor
+        if hasattr(tensor, "data") and hasattr(tensor.data, "full_tensor"):  # dtensor
             tensor = tensor.data.full_tensor()
-        else:
-            tensor = tensor.data
+        elif hasattr(tensor, "data"):
+             tensor = tensor.data
+
 
         if save_dtype:
             tensor = tensor.to(dtype=getattr(torch, save_dtype) if isinstance(save_dtype, str) else save_dtype)

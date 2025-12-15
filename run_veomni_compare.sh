@@ -76,7 +76,15 @@ uv sync --extra gpu --extra audio # --frozen
 # uv pip install -e .[gpu,audio]
 
 NNODES=${NNODES:=1}
-NPROC_PER_NODE=${NPROC_PER_NODE:=8}
+if command -v nvidia-smi &> /dev/null && nvidia-smi --list-gpus &> /dev/null; then
+  if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
+    NPROC_PER_NODE=${NPROC_PER_NODE:=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)}
+  else
+    NPROC_PER_NODE=${NPROC_PER_NODE:=$(nvidia-smi --list-gpus | wc -l)}
+  fi
+else
+  NPROC_PER_NODE=${NPROC_PER_NODE:=8}
+fi
 NODE_RANK=${NODE_RANK:=0}
 MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
 MASTER_PORT=${MASTER_PORT:=12345}
@@ -94,7 +102,7 @@ fi
 #   --node-rank=$NODE_RANK \
 #   $additional_args \
 #   tasks/omni/train_qwen2_vl.py \
-#   configs/multimodal/qwen3_vl/qwen3_vl_8b_pt.yaml \
+#   configs/multimodal/qwen3_vl/qwen3_vl_8b_sft.yaml \
 #   2>&1 | tee veomni_compare.log
 
 uv run --extra gpu --extra audio torchrun \
@@ -103,5 +111,5 @@ uv run --extra gpu --extra audio torchrun \
   --node-rank=$NODE_RANK \
   $additional_args \
   tasks/omni/train_qwen2_vl.py \
-  configs/multimodal/qwen3_vl/qwen3_vl_moe_pt.yaml \
+  configs/multimodal/qwen3_vl/qwen3_vl_moe_sft.yaml \
   2>&1 | tee veomni_compare.log

@@ -1,6 +1,7 @@
 model:
   # model_path: Qwen/Qwen3-VL-8B-Instruct
-  model_path: 0.25_5e-5_vitfreeze_25-mix_full/checkpoints/global_step_6386_hf
+  # model_path: ./qwen3_vl_8b_pt_2e-5/checkpoints/global_step_11159_hf
+  model_path: ./8b_1e-5_deepfry_80split_fixtool/checkpoints/global_step_7974_hf
   attn_implementation: flash_attention_2
 
 data:
@@ -30,29 +31,31 @@ train:
 
   freeze_vit: true
   # vit_lr: 1.0e-6
-  lr: 1e-5
-  lr_warmup_ratio: 0.007
+  lr: 2e-5
+  num_train_epochs: 1
+  lr_warmup_ratio: 0.01
   lr_decay_style: cosine
-  weight_decay: 0.1
-  output_dir: "8b_sft_continue"
+  weight_decay: 0.01
+  output_dir: "8b_sft_dfcontinue"
   data_parallel_mode: fsdp2
   enable_reentrant: false
   use_wandb: true
   wandb_project: "gcd-run-42_vl_sft"
-  wandb_name: "8b_sft_continue"
+  wandb_name: "8b_sft_dfcontinue"
   rmpad: false
   rmpad_with_pos_ids: true
   ulysses_parallel_size: 1
-  num_train_epochs: 1
+  # num_train_epochs: 1
   micro_batch_size: 1
   global_batch_size: 8
-  # max_steps: null #30000 # 6B tokens?
+  # max_steps: 1 #30000 # 6B tokens?
   # save_steps: 5000
   init_device: meta
   ckpt_manager: dcp
   save_hf_weights: false
   allow_cuda_launch_blocking: false
-  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/8b_sft_continue # S3 path for auto-upload
+  checkpoint_upload_path: s3://camfer-weights/gcd-run-42/8b-vl/8b_sft_dfcontinue # S3 path for auto-upload
+  # load_checkpoint_path: ./qwen3_vl_8b_pt_2e-5/checkpoints/global_step_11159
   # memory ops
   enable_mixed_precision: true
   optimizer: "adamw"
